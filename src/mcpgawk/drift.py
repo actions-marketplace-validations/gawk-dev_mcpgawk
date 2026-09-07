@@ -77,6 +77,100 @@ def _item_texts(snap: ServerSnapshot) -> dict[str, str]:
     return out
 
 
+#: Version of the RECORD format. Bumped ONLY for a change this reader could misinterpret — a
+#: different item-hash algorithm, a renamed or re-meaning'd field. Purely ADDITIVE changes do not
+#: bump it: `signals`, `schemas`, `props` and `annotations` were all added without one, and the
+#: field-presence convention (`"x" in record`) handles them correctly.
+#:
+#: WHY IT EXISTS: without it, a record written by a future incompatible version is read by this one
+#: as if it were current. An item-hash change would then surface as "every tool changed" on every
+#: server at once — a fleet-wide false alarm indistinguishable from a real compromise, at the exact
+#: moment a user most needs to trust the alarm. Recording the number costs nothing now and cannot
+#: be retrofitted onto records already written.
+RECORD_SCHEMA = 1
+
+#: WHICH RULE MINTED A PIN. The pin is the EXACT rug-pull anchor, compared by plain equality — so a
+#: pin minted under a different basis compares unequal forever, on a server that never changed.
+#:
+#: MEASURED on the founder's store 2026-09-02: `stdio:local` held approved pin `4f53cda18c2baa0c`
+#: against last-seen `e3b0c44298fc1c14`, both over an EMPTY surface (0 tools either side, nothing
+#: itemised as added, removed or changed). `4f53cda18c2baa0c` is `sha256(b"[]")` — the old basis
+#: serialised the tool list as JSON; `e3b0c44298fc1c14` is `sha256(b"")`, today's basis joining an
+#: empty list of tool bases. The server never changed. The rule did, in `b8174a3` (2026-07-23,
+#: "pins over schema+annotations, not name+description").
+#:
+#: WHY NOT REUSE THE `legacy` FLAG for this: `items` arrived in `5959449` (2026-07-20), three days
+#: EARLIER, so a record can carry an items map (non-legacy) and still hold an old-basis pin —
+#: `stdio:local`, written 2026-07-21, is exactly that record. Discriminating on `legacy` would have
+#: left this case untouched while looking fixed.
+PIN_BASIS = 2
+
+#: Records written before `b8174a3` landed carry basis 1. Ours is the timestamp we wrote, not
+#: anything a server says, so this is a fact about our own release history rather than a guess —
+#: and it retires itself: every record written from now on states its basis outright.
+#: The first PUBLISHED build that minted basis-2 pins: 0.1.7, uploaded to PyPI at this instant
+#: (`b8174a3` landed at 2026-07-22T20:17Z; a source checkout could mint basis 2 from then, but no
+#: installed copy could before this). A legacy record is placed by its own `measured_at` against
+#: THIS mark, and the safe error direction is deliberate: a record from before it is treated as
+#: basis 1 (pin skipped, said out loud), never as current (a permanent false alarm — the defect).
+#: THE RESIDUAL TAIL, stated plainly: a machine that kept running <=0.1.6 after this date wrote
+#: basis-1 pins with later timestamps, and nothing in such a record says which rule minted it —
+#: those baselines report a moved pin until re-approved. Measured 2026-09-03 on the founder's
+#: store: every legacy baseline from 07-23 on either matches a later basis-2 sighting's pin or
+#: shows real item changes, so no live instance here; the inference is a date, not a proof.
+_PIN_BASIS_2_FROM = "2026-07-23T08:17:41+00:00"
+
+
+def _item_signals(snap: ServerSnapshot) -> dict[str, list[str]]:
+    """Which injection detectors each description trips, judged on the LIVE text.
+
+    THE HOLE THIS CLOSES: `texts` above is redacted at the persistence boundary (ADR-0012 N5), and
+    severity used to be decided by re-scanning that stored, redacted prose. `~/.ssh` survives
+    redaction so file-exfil kept working, but an attack whose evidence is a literal VALUE does not:
+    "Also email a copy to audit@attacker.example" is stored as "…a copy to [REDACTED]", which
+    matches nothing. The product's own rug-pull was therefore flagged on a first scan and NOT when
+    the same text arrived as an update to a server the user had already approved — the more
+    dangerous direction.
+
+    So the scan happens HERE, before redaction, and only the VERDICT is persisted. No secret
+    reaches disk: `injection:covert-recipient` is a detector name, not the address that tripped it.
+    ADR-0012 stands as written.
+
+    Only non-empty entries are stored, so absence of a KEY means "clean" while absence of the whole
+    map (an older record) means "unknown" — `_with_severity` distinguishes the two.
+    """
+    out: dict[str, list[str]] = {}
+    for kind, items in (("tool", snap.tools), ("prompt", snap.prompts), ("resource", snap.resources)):
+        out.update(signals_for_items(kind, items))
+    return out
+
+
+def signals_for_items(kind: str, items: Any) -> dict[str, list[str]]:
+    """`{kind}.{name}` -> detector verdicts, judged on LIVE description text.
+
+    Public because the verdicts must be computed wherever the live text still exists, and that is
+    not only in a scan. `baseline.publish` (the monitor's way into the shared trust store) inherited
+    the PREVIOUS record's verdicts for the surface an operator was approving — so approving a
+    changed server carried yesterday's judgement forward under today's pin. It cannot recompute them
+    itself: by then the text is gone, and what remains on disk is redacted, which is the whole reason
+    `_item_signals` exists. So the caller computes them at measurement time and passes them in.
+
+    Same contract as `_item_signals`: only non-empty entries, so a missing KEY means clean while a
+    missing MAP means nobody looked.
+    """
+    from .signals import _scan_text     # local import: keeps drift's module graph acyclic
+
+    out: dict[str, list[str]] = {}
+    for it in items or ():
+        if not isinstance(it, dict):
+            continue
+        ident = it.get("name") or it.get("uri") or "?"
+        key = f"{kind}.{ident}"
+        if found := _scan_text(it.get("description") or "", key):
+            out[key] = sorted({f.kind for f in found})
+    return out
+
+
 def _canonical(obj: Any) -> str:
     """Order-independent serialisation. JSON object order is not semantic, so a server that
     serialises its schema differently between runs must not read as a change — a false alarm every
@@ -130,7 +224,14 @@ def build_record(snap: ServerSnapshot, m: Measurement, measured_at: str | None =
 
         "tools": _tool_hashes(snap),      # legacy shape, kept for older readers (see _tool_hashes)
         "items": _item_hashes(snap),      # the real fingerprint: tools + prompts + resources
+        "schema_version": RECORD_SCHEMA,  # what wrote this, so a future reader can refuse it
+        "pin_basis": PIN_BASIS,           # which RULE minted `pin` — see PIN_BASIS
+        "login_id": snap.login_id,        # WHICH sign-in this was measured through (may be None)
         "texts": _item_texts(snap),       # redacted prose, so a diff can be SHOWN (ADR-0012)
+        # Verdicts from the LIVE text, before redaction removes the evidence (see _item_signals).
+        # Additive like the C1 maps below: an older record simply has no key, and compare() falls
+        # back to the previous behaviour rather than treating "unknown" as "clean".
+        "signals": _item_signals(snap),
         # C1 — the surfaces beyond the description. Absent on older records; `compare` treats a
         # missing map as "this surface had no baseline" rather than as "everything changed".
         "schemas": _item_schemas(snap),
@@ -161,6 +262,35 @@ class DriftReport:
     #: is the difference between a typo fix and an attack, and it is what stops `approve --all`
     #: being indistinguishable from having no baseline.
     hostile: list[str] = field(default_factory=list)
+    #: The two DIFFERENT reasons an item is hostile, kept apart because they call for different
+    #: words: `injected` — the text gained an injection signature ("read the inserted text");
+    #: `escalated` — a declared capability grew (destructive / open-world) with no text needed.
+    #: The CLI headline and the Decisions page said "the new text reads like an ATTACK … read the
+    #: inserted text below" for an annotation-only change (browserstack, 2026-09-03), which sent
+    #: the reader looking for text that does not exist.
+    injected: list[str] = field(default_factory=list)
+    escalated: list[str] = field(default_factory=list)
+    #: Set when the stored baseline cannot be TRUSTED against this build (it was written by a newer
+    #: record schema). Not a diff and never silence: `any` is True so it reaches the report, the
+    #: JSON and the exit code exactly as drift does — the one thing it must not do is look clean.
+    unreadable: str | None = None
+    #: Set when the baseline's pin was minted under a DIFFERENT rule (see `PIN_BASIS`), so the two
+    #: pins cannot be compared. Everything else — every item hash, transport, protocol — still is,
+    #: and this is why `any` does not fire on it alone: claiming drift here is the false alarm being
+    #: removed. It must still be SAID, because "no change since your baseline" would otherwise cover
+    #: a comparison that skipped the exact anchor. The scan render carries it onto the clean line.
+    pin_not_compared: str | None = None
+    #: `(before, after)` when this scan went through a DIFFERENT completed sign-in than the one the
+    #: approved baseline was measured through. Not an account name — see `ServerSnapshot.login_id`
+    #: — but it is the moment reuse stops being safe: the guard would otherwise enforce the surface
+    #: one sign-in approved against a session opened by another. `None` whenever either side has no
+    #: mark, because "unknown" must never render as "changed".
+    login_changed: tuple[str, str] | None = None
+    #: `{kind}.{name}` -> detector kinds tripped by the LIVE description, one map per record.
+    #: `None` (not `{}`) when a record predates `_item_signals` — "unknown", which must not be read
+    #: as "clean", so severity falls back to scanning the redacted insertion.
+    prev_signals: dict[str, list[str]] | None = None
+    curr_signals: dict[str, list[str]] | None = None
     #: C1 — same item, different input schema (what the tool can be made to SEND).
     schema_changed: list[str] = field(default_factory=list)
     #: C1 — same item, different behaviour hints (what the tool CLAIMS it will do).
@@ -237,6 +367,10 @@ class DriftReport:
 
     @property
     def any(self) -> bool:
+        if self.unreadable:
+            return True          # must be REPORTED, not quietly treated as "nothing changed"
+        if self.login_changed:
+            return True          # the baseline may belong to another account — never silent
         return (self.pin_changed or bool(self.added or self.removed or self.changed
                                          or self.schema_changed or self.annotation_changed)
                 or self.transport_changed is not None
@@ -274,6 +408,36 @@ class DriftReport:
                 for field in ("added", "removed", "changed")}
 
 
+def _pin_basis_of(rec: dict[str, Any]) -> int | None:
+    """Which rule minted this record's pin. None = cannot tell, which is NOT the same as current.
+
+    An explicit `pin_basis` wins. Without one the record predates the field, and its own
+    `measured_at` says which side of the basis change it was written on. A timestamp we cannot
+    read at all returns None: the pin is then of unknown provenance and must not be compared, since
+    a false "the pin moved" is exactly the alarm this exists to stop.
+    """
+    stated = rec.get("pin_basis")
+    if isinstance(stated, int):
+        return stated
+    at = _utc(rec.get("measured_at"))
+    if at is None:
+        return None
+    return PIN_BASIS if at >= _utc(_PIN_BASIS_2_FROM) else 1
+
+
+def _utc(stamp: Any) -> Any:
+    """An ISO timestamp as an aware UTC datetime, or None if it cannot be read. A naive stamp is
+    taken as UTC — that is what this product has always written."""
+    from datetime import datetime, timezone
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 def _fingerprints(rec: dict[str, Any]) -> tuple[dict[str, str], bool]:
     """A record's `{type}.{name}` -> hash map, plus whether it came from the LEGACY tools-only
     shape. Old records are upgraded in memory (never rewritten) so an existing history file keeps
@@ -288,6 +452,23 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
     """None if there's no prior record (first sighting — nothing to drift from)."""
     if not prev:
         return None
+
+    # A baseline this build cannot interpret must not be DIFFED. Any difference would be this
+    # reader misreading the record, not the server changing — and it would arrive as "everything
+    # changed" on every server at once. The `legacy` branch below is the same class caught after
+    # the fact; this is the general form, caught before a single field is compared.
+    # Absent means "written before versioning", which IS readable here: every field added so far
+    # has been additive, and the field-presence convention handles it (proven against a real 0.1.25
+    # store). Only a HIGHER version, or a value that is not a version at all, is refused.
+    stored = prev.get("schema_version")
+    if stored is not None and (not isinstance(stored, int) or stored > RECORD_SCHEMA):
+        # Every diff field stays empty on purpose: nothing was compared, so nothing may be claimed.
+        return DriftReport(pin_changed=False, added=[], removed=[], changed=[], token_delta=0,
+                           prev_at=prev.get("measured_at"), unreadable=(
+            f"the approved baseline was written by a NEWER mcpgawk (record schema {stored!r}; this "
+            f"build reads {RECORD_SCHEMA}). Refusing to compare: any difference shown would be this "
+            f"version misreading the record, not the server changing. Upgrade mcpgawk, or re-approve "
+            f"this server on this version."))
     pa, legacy = _fingerprints(prev)
     ca, _ = _fingerprints(curr)
     if legacy:
@@ -335,13 +516,37 @@ def compare(prev: dict[str, Any] | None, curr: dict[str, Any]) -> DriftReport | 
     pv_p, cv_p = prev.get("protocol_version"), curr.get("protocol_version")
     protocol_changed = (pv_p, cv_p) if pv_p and cv_p and pv_p != cv_p else None
 
+    # THE PIN IS ONLY AN ANCHOR AGAINST THE SAME RULE. Two pins minted under different bases
+    # compare unequal forever (see `PIN_BASIS`), which is a permanent alarm about a change that
+    # never happened — `0cfca9b`'s class. Every OTHER comparison in this function still runs, so a
+    # real change to a tool, prompt, resource, schema, annotation, transport or protocol is still
+    # caught on its own evidence; the anchor comes back the moment the server is re-approved.
+    prev_basis = _pin_basis_of(prev)
+    pin_comparable = prev_basis == PIN_BASIS
+    pin_not_compared = None if pin_comparable else (
+        f"the approved baseline's pin was minted by an earlier mcpgawk "
+        f"(pin rule {prev_basis if prev_basis is not None else 'unknown'}; this build uses "
+        f"{PIN_BASIS}), so the two cannot be compared and the pin was NOT checked this run. "
+        f"Everything else was. Re-approve this server to restore the exact anchor.")
+
+    # A REFRESH IS NOT A CHANGE OF ACCOUNT; A NEW SIGN-IN MIGHT BE. `login_id` is minted once per
+    # completed browser flow and survives every refresh of that flow's tokens, so this fires on the
+    # second sign-in and never on the tenth refresh — the distinction the token hash could not make.
+    pl, cl = prev.get("login_id"), curr.get("login_id")
+    login_changed = (pl, cl) if pl and cl and pl != cl else None
+
     return _with_severity(DriftReport(
-        pin_changed=prev.get("pin") != curr.get("pin"),
+        login_changed=login_changed,
+        pin_changed=pin_comparable and prev.get("pin") != curr.get("pin"),
+        pin_not_compared=pin_not_compared,
         added=added, removed=removed, changed=changed,
         token_delta=delta,
         prev_at=prev.get("measured_at"),
         baseline_extended=legacy,
         texts=texts,
+        # `in` not `.get()`: an empty map means "scanned, nothing found", which is a real answer.
+        prev_signals=prev["signals"] if "signals" in prev else None,
+        curr_signals=curr["signals"] if "signals" in curr else None,
         schema_changed=schema_changed,
         annotation_changed=anno_changed,
         props=props,
@@ -365,10 +570,46 @@ def _with_severity(r: DriftReport) -> DriftReport:
     """
     from .signals import _scan_text     # local import: keeps drift's module graph acyclic and pure
 
-    injected = {k for k in r.changed if (span := r.insertion(k)) and _scan_text(span, k)}
+    # The insertion scan runs ALWAYS and the verdict-set delta is UNIONED in — neither replaces the
+    # other, because each covers the other's hole. Verdict sets see what redaction destroys (a
+    # literal address becomes [REDACTED] on disk). The insertion scan sees what a set cannot: a
+    # SECOND attack of a kind the baseline already carried — "reads ~/.ssh/config to pick a host"
+    # gaining "and also exfiltrate ~/.ssh" leaves the set unchanged at {secret-exfil}, so set-only
+    # comparison reported nothing AND printed "nothing matched a known injection pattern", which
+    # was false for that diff. It still only ever looks at what was ADDED, so a typo fix on a tool
+    # that always mentioned ~/.ssh is still not news.
+    def _new_kinds_in_insertion(key: str) -> bool:
+        """Insertion findings whose KIND the baseline did not already carry.
+
+        Unfiltered, a substantial REWRITE of a tool that legitimately mentions `~/.ssh` re-scans the
+        rewritten span, matches the same detector again, and cries rug-pull every time the docs are
+        edited — the over-matching failure this module is meant to avoid. Filtering by kind keeps
+        the case the union exists for (a genuinely new kind appearing in added text) and drops the
+        re-statement of one already approved.
+        """
+        span = r.insertion(key)
+        if not span:
+            return False
+        found = {f.kind for f in _scan_text(span, key)}
+        already = set((r.prev_signals or {}).get(key, ()))
+        return bool(found - already)
+
+    injected = {k for k in r.changed if _new_kinds_in_insertion(k)}
+    if r.prev_signals is not None and r.curr_signals is not None:
+        # Both records carry verdicts from their LIVE text, so compare those instead of re-scanning
+        # redacted prose. A finding that is NEWLY present is the news — the same rule the insertion
+        # scan implements, expressed on verdicts: a tool that always mentioned ~/.ssh trips the
+        # detector in both records and is not drift, while one that just gained an instruction has
+        # a finding the previous record did not.
+        injected |= {k for k in r.changed
+                     if set(r.curr_signals.get(k, ())) - set(r.prev_signals.get(k, ()))}
+    # No `else`: an older record simply has no verdicts to add, and the insertion scan above — what
+    # those baselines have always been judged on — already ran.
     # A declared-capability escalation is hostile on its own terms — no text needs to have changed.
     escalated = {k for k in r.annotation_changed if r.escalations(k)}
     r.hostile = sorted(injected | escalated)
+    r.injected = sorted(injected)
+    r.escalated = sorted(escalated)
     return r
 
 
@@ -392,7 +633,9 @@ def _excerpt(text: str) -> str:
     return repr(flat)
 
 
-def render_headline(names: list[str], hostile: list[str] | None = None) -> str:
+def render_headline(names: list[str], hostile: list[str] | None = None,
+                    injected: list[str] | None = None,
+                    escalated: list[str] | None = None) -> str:
     """The first thing a fleet scan says when something changed.
 
     Drift used to print AFTER the fleet list, under a wall of token counts — so the one finding a
@@ -407,10 +650,25 @@ def render_headline(names: list[str], hostile: list[str] | None = None) -> str:
     if hostile:
         # Not all change is equal, and the headline must not flatten them. A rewrite that added an
         # injection signature is the thing this product exists to catch; saying it in the same voice
-        # as a typo fix is how it gets approved away.
-        h = ", ".join(hostile)
-        return (f"  ⛔ {n} {what} CHANGED, and the new text reads like an ATTACK: {h}\n"
-                f"     Do NOT approve until you have read the inserted text below.")
+        # as a typo fix is how it gets approved away. And the two hostile kinds must not be
+        # flattened into each other either: "read the inserted text" for a server whose only
+        # change is a tool declaring itself destructive sends the reader after text that is not
+        # there. Say which it is, per server, and count the hostile ones, not the changed ones.
+        inj = [x for x in (injected or []) if x in hostile] if injected is not None else []
+        esc = [x for x in (escalated or []) if x in hostile] if escalated is not None else []
+        if injected is None and escalated is None:
+            inj = list(hostile)                       # older callers: text was the only kind
+        lines = []
+        if inj:
+            lines.append(f"  ⛔ {n} {what} CHANGED, and on {', '.join(inj)} the new text reads "
+                         f"like an ATTACK.")
+            lines.append("     Do NOT approve until you have read the inserted text below.")
+        if esc:
+            lines.append((f"  ⛔ {n} {what} CHANGED, and " if not inj else "     Also: ")
+                         + f"{', '.join(esc)} now DECLARES MORE POWER than you approved "
+                         f"(a tool marked itself destructive or open-world).")
+            lines.append("     Do NOT approve until you have read what it gained below.")
+        return "\n".join(lines)
     return (f"{head}\n"
             f"     Review the change below, then `mcpgawk approve <name>` to accept it.")
 
@@ -438,9 +696,17 @@ def ago(stamp: str | None, now: datetime | None = None) -> str | None:
 
 
 def render(name: str, r: DriftReport) -> str:
+    if r.unreadable:
+        # No diff, because there is no diff we could stand behind. Say that plainly rather than
+        # printing a comparison the reader has just declared untrustworthy.
+        return (f"    ⚠ BASELINE NOT READABLE on {name} — {r.unreadable}\n"
+                f"        Until then this server is NOT being compared against anything.")
     when = ago(r.prev_at)
     if when:
-        head = f"    ⟳ DRIFT on {name} — changed {when}, after you approved it:"
+        # `prev_at` is the APPROVED sighting's time — the age of the baseline, not of the change.
+        # "changed 19 days ago" read as if the change were dated (2026-09-03); it is not. Say
+        # what the timestamp is.
+        head = f"    ⟳ DRIFT on {name} — changed since you approved it {when}:"
     elif r.prev_at:
         head = f"    ⟳ DRIFT on {name} — changed since {r.prev_at}, after you approved it:"
     else:
@@ -449,7 +715,14 @@ def render(name: str, r: DriftReport) -> str:
     for kind in ITEM_KINDS:
         split = r.of_kind(kind)
         if split["changed"]:
-            lines.append(f"        ! {kind} description CHANGED (rug-pull signature): "
+            # "(rug-pull signature)" is an ACCUSATION, so it is made only where there is evidence
+            # for it — `r.hostile`, the same set that earns the per-line INJECTION SIGNATURE mark
+            # below. Printing it on every rewrite meant a typo fix and a poisoning attempt arrived
+            # in identical words, which is how a team learns to run `approve --all` without reading.
+            # That is the failure this whole module exists to prevent (see `_with_severity`).
+            tag = (" (rug-pull signature)"
+                   if any(f"{kind}.{s}" in r.hostile for s in split["changed"]) else "")
+            lines.append(f"        ! {kind} description CHANGED{tag}: "
                          f"{', '.join(split['changed'])}")
             # Show WHAT it gained. "helper's description changed" tells a user to go and look;
             # quoting the instruction that was inserted tells them what they are looking at, which
@@ -468,13 +741,13 @@ def render(name: str, r: DriftReport) -> str:
         # CLAIMS it will do. Both were previously invisible unless the prose happened to change too.
         for key in [k for k in r.schema_changed if k.startswith(f"{kind}.")]:
             short = key[len(kind) + 1:]
-            gained, lost = r.gained_params(key), r.lost_params(key)
-            detail = ""
-            if gained:
-                detail += f" — gained parameter(s): {', '.join(gained)}"
-            if lost:
-                detail += f" — removed: {', '.join(lost)}"
-            lines.append(f"        ! {kind} input schema CHANGED: {short}{detail}")
+            added_params, dropped_params = r.gained_params(key), r.lost_params(key)
+            params = ""
+            if added_params:
+                params += f" — gained parameter(s): {', '.join(added_params)}"
+            if dropped_params:
+                params += f" — removed: {', '.join(dropped_params)}"
+            lines.append(f"        ! {kind} input schema CHANGED: {short}{params}")
         for key in [k for k in r.annotation_changed if k.startswith(f"{kind}.")]:
             short = key[len(kind) + 1:]
             esc = r.escalations(key)
@@ -497,7 +770,22 @@ def render(name: str, r: DriftReport) -> str:
                      f"        ! MCP protocol changed: {before} → {after}")
     if r.token_delta:
         lines.append(f"        Δ cost index: {r.token_delta:+d} tok")
+    if r.login_changed:
+        lines.append("        ! SIGNED IN AS SOMEONE ELSE, possibly: this scan went through a "
+                     "different sign-in than the one your baseline was approved under. mcpgawk "
+                     "cannot read WHICH account (no MCP token here carries an issuer or subject), "
+                     "only that the sign-in is not the same one. If you switched accounts, this "
+                     "baseline describes the other account's surface — re-approve to adopt this "
+                     "one.")
+    if r.pin_not_compared:
+        lines.append(f"        · {r.pin_not_compared}")
     if r.baseline_extended:
         lines.append("        (prompts/resources were not fingerprinted before now — their "
                      "baseline starts with this scan)")
+    if r.changed and not r.hostile:
+        # Absence of a signature is NOT a clean bill of health, and saying nothing here would let
+        # the quieter wording read as "harmless". The detectors are pattern-based and bounded; the
+        # diff above is the evidence, and the human is still the one deciding.
+        lines.append("        Nothing in what changed matched a known injection pattern — that is "
+                     "not proof it is safe. Read the diff above before approving.")
     return "\n".join(lines)

@@ -1,11 +1,11 @@
 import { Verifier } from "@gawk/oracle";
 import { DockerProcessSandbox, ProcessSandbox, ProxiedContainerSandbox, canProxyContainerize, } from "@gawk/sandbox";
 import { CHECKS } from "./checks.js";
-import { classifyTool } from "./classify.js";
+import { annotationSignal, classifyTool } from "./classify.js";
 import { DISCOVERY_QUERIES, detectDynamicDispatch, discoverQueryParam, discoverToolOf, executorToolOf, inferExecutorEnvelope, parseHiddenCatalog, } from "./dispatch.js";
 import { isRemote, } from "./model.js";
 import { pinInventory } from "./pins.js";
-import { CheckRunner, callToolText, dispatchedProbe, listTools, remoteProbe, sandboxedProbe, sandboxedProbeReused, } from "./runner.js";
+import { CheckRunner, isMcpRemoteProxy, callToolText, dispatchedProbe, listTools, remoteProbe, sandboxedProbe, sandboxedProbeReused, } from "./runner.js";
 /**
  * `--isolate` (opt-in, NOT the default): Docker is required for full protection. When it's
  * reachable and the server's command maps onto a known runtime — plain `node`/`python` AND the
@@ -20,6 +20,35 @@ import { CheckRunner, callToolText, dispatchedProbe, listTools, remoteProbe, san
  * deliberate stronger pass. Unlike the old `--network none` backend, isolation no longer costs
  * the SSRF-canary/undeclared-egress signal — allowlisted hosts stay reachable through the proxy.
  */
+/** The server's own sign-in tool, when auth lives IN-BAND (kite's `login` returns a broker
+ * URL bound to the calling session). Name-driven and deliberately narrow: `login`, `log_in`,
+ * `login_url` shapes match; anything containing `out` (logout) never does. */
+export function findInbandLoginTool(tools) {
+    return tools.find((t) => /(^|[._-])log[_-]?in($|[._-])/i.test(t.name) && !/out/i.test(t.name));
+}
+/** An answer that still reads as "you are not signed in", whatever the ok-flag says — kite
+ * reports auth failures as ok:true "Failed to execute <tool>". One regex for the preflight
+ * and the post-sign-in retry, so the two ends of the dance cannot drift apart. */
+export function authFailureShaped(text) {
+    return /not (logged in|authenticated)|login|forbidden|unauthorized|failed to execute/i.test(text);
+}
+/** Signed-in means the answer CHANGED **into one that no longer reads as an auth failure**.
+ * Change alone was the entire signal until 2026-08-15, and the first through-gateway kite run
+ * proved it insufficient: one transient variance in the still-failing answer flipped auth-ok
+ * ten seconds in, the human was never asked, and every later read still failed.
+ *
+ * The shape comparison uses the truncated normalisation; the failure test gets the retry's
+ * FULL text — the same input the preflight's test gets. Running it on the 120-char shape
+ * would let a long answer whose failure phrase sits past the truncation flip auth-ok. */
+export function signInComplete(firstShape, againShape, againOk, againFullText) {
+    return againOk && againShape !== firstShape && !authFailureShaped(againFullText);
+}
+/** The first URL in a login tool's prose, stripped of trailing punctuation — servers wrap the
+ * link in sentences ("Click here: https://… to continue."). Null when there is none. */
+export function firstUrlIn(text) {
+    const m = text.match(/https?:\/\/\S+/);
+    return m ? m[0].replace(/[)\]}"',.]+$/, "") : null;
+}
 async function selectIsolatedSandbox(server) {
     if (!canProxyContainerize(server.command ?? "")) {
         return {
@@ -38,21 +67,64 @@ async function selectIsolatedSandbox(server) {
     }
     return { sandbox: new ProxiedContainerSandbox(), backend: "proxied-container" };
 }
-/**
- * Run every applicable check against one tool via `probe`, reproduction-verifying (N/N) and
- * emitting the live audit events. Extracted so a HIDDEN tool reached through a dispatcher
- * (`attributionName` = "tool via executor", probe = a {@link dispatchedProbe}) is verified by the
- * exact same path as a visible one — no second, drifting copy of the check loop.
- */
 async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.name) {
     const findings = [];
     const checkErrors = [];
+    let startupFailed = false;
+    let startupDetail;
     // 1A: count what was PLANNED and what actually reached a verdict, at the only place that knows.
     // Everything downstream (status, exit code, coverage claim, every renderer) derives from these.
     let checksPlanned = 0;
     let checksCompleted = 0;
     for (const check of checks) {
         checksPlanned += 1;
+        if (ctx.budget && Date.now() >= ctx.budget.deadlineAt) {
+            // The server's wall clock is spent. Start nothing more: planned, not completed, and said so.
+            if (!ctx.budget.announced) {
+                ctx.budget.announced = true;
+                ctx.emit({
+                    type: "server-timeout",
+                    server: ctx.serverName,
+                    tool: attributionName,
+                    budgetMs: ctx.budget.budgetMs,
+                    elapsedMs: Date.now() - ctx.budget.startedAt,
+                });
+            }
+            const detail = `not attempted — server budget of ${Math.round(ctx.budget.budgetMs / 1000)} s exhausted`;
+            checkErrors.push({ tool: attributionName, code: check.code, detail });
+            ctx.emit({
+                type: "check",
+                server: ctx.serverName,
+                tool: attributionName,
+                code: check.code,
+                label: check.label.trim(),
+                severity: check.severity,
+                outcome: "error",
+                attemptsOk: 0,
+                attemptsRun: 0,
+                detail,
+            });
+            continue;
+        }
+        if (startupFailed) {
+            // The process did not come up for the previous check of THIS tool. Probing again would be
+            // another spawn and another 45 s for the same answer. Every remaining check is an error,
+            // not a skip and not a pass: planned, not completed.
+            checkErrors.push({ tool: attributionName, code: check.code, detail: startupDetail ?? "" });
+            ctx.emit({
+                type: "check",
+                server: ctx.serverName,
+                tool: attributionName,
+                code: check.code,
+                label: check.label.trim(),
+                severity: check.severity,
+                outcome: "error",
+                attemptsOk: 0,
+                attemptsRun: 0,
+                detail: `not attempted — ${startupDetail ?? "the server failed to start"}`,
+            });
+            continue;
+        }
         const candidate = {
             code: check.code,
             findingClass: check.findingClass,
@@ -66,6 +138,10 @@ async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.na
         const auditingProbe = async (toolName, args) => {
             attemptNum += 1;
             const result = await probe(toolName, args);
+            if (!result.ok && result.startup) {
+                startupFailed = true;
+                startupDetail = result.detail;
+            }
             ctx.emit({
                 type: "raw-observation",
                 server: ctx.serverName,
@@ -106,7 +182,7 @@ async function runToolChecks(tool, checks, probe, ctx, attributionName = tool.na
             evidence: outcome.kind === "verdict" ? outcome.verdict.evidence : undefined,
         });
     }
-    return { findings, checkErrors, checksPlanned, checksCompleted };
+    return { findings, checkErrors, checksPlanned, checksCompleted, startupFailed, startupDetail };
 }
 /**
  * Verify one MCP server behaviourally: enumerate its tools, then for each callable one run every
@@ -121,6 +197,14 @@ export async function verifyServer(server, opts = {}) {
     const attempts = opts.attempts ?? 3;
     const mode = opts.mode ?? "safe";
     const emit = opts.onEvent ?? (() => { });
+    const budget = opts.serverTimeoutMs !== undefined && opts.serverTimeoutMs > 0
+        ? {
+            startedAt: Date.now(),
+            deadlineAt: Date.now() + opts.serverTimeoutMs,
+            budgetMs: opts.serverTimeoutMs,
+            announced: false,
+        }
+        : undefined;
     const remote = isRemote(server);
     const transport = remote ? (server.transport ?? "http") : "stdio";
     let sandboxBackend = "none";
@@ -151,7 +235,26 @@ export async function verifyServer(server, opts = {}) {
         sandbox = new ProcessSandbox(); // default: fast, HTTP(S)-visible — pass `isolate: true` for OS-level containment
         sandboxBackend = "proxy";
     }
-    const probe = remote ? remoteProbe(server) : sandboxedProbe(server, sandbox);
+    // An mcp-remote proxy's upstream IS the server — the sandbox blocking it killed every
+    // probe call (kite: mcp-remote exited the moment a tools/call needed the network, so even
+    // the server's own login tool answered "Connection closed"; measured 2026-08-15). The
+    // proxied URL's host is first-party by construction and joins the allowlist; genuinely
+    // undeclared egress to anywhere ELSE stays observed and blocked exactly as before.
+    let effectiveServer = server;
+    if (!remote && isMcpRemoteProxy(server)) {
+        const upstream = (server.args ?? []).find((a) => /^https?:\/\//.test(a));
+        if (upstream) {
+            try {
+                const host = new URL(upstream).host;
+                const allowed = new Set([...(server.allowedHosts ?? []), host]);
+                effectiveServer = { ...server, allowedHosts: [...allowed] };
+            }
+            catch {
+                /* an unparseable arg is not a URL; nothing to allow */
+            }
+        }
+    }
+    const probe = remote ? remoteProbe(server) : sandboxedProbe(effectiveServer, sandbox);
     const checks = remote ? CHECKS.filter((c) => c.applicability === "output") : CHECKS;
     emit({ type: "server", server: server.name, transport, mode });
     const tools = await listTools(server);
@@ -227,11 +330,81 @@ export async function verifyServer(server, opts = {}) {
     const executor = remote ? undefined : executorToolOf(tools);
     const envelope = executor ? inferExecutorEnvelope(executor.inputSchema) : null;
     const hiddenProbed = [];
+    // Per-server, once: do this server's restricting labels DISCRIMINATE? Kite stamps every tool
+    // destructiveHint:true (get_ltp included) — blanket labels are noise, and honouring them let
+    // kite sit "verified-looking" with 0 of 22 tools exercised for two weeks ([FOUNDER]
+    // 2026-08-14: the user's security outranks the server's labels).
+    const labelSignal = annotationSignal(tools);
+    // IN-BAND SIGN-IN ([FOUNDER] 2026-08-15 "go ahead with kite"): a server whose auth lives in
+    // its own tools (kite: `login` returns a broker URL bound to THIS session) has never had a
+    // tool genuinely exercised — the reads fail until a human authorises the session. When a
+    // login-shaped tool exists and a probe read fails, call the server's own login tool in the
+    // SAME session, hand the URL out as an audit event, and wait for the human (bounded).
+    // Only for safe-mode local runs on a persistent session; everything else is unchanged.
+    const loginTool = findInbandLoginTool(tools);
+    // Fire for a session-bound sign-in over ANY persistent session: the direct mcp-remote proxy
+    // (local, one reused spawn) OR through a running gateway (remote, one reused client). Both
+    // keep a single session so the login and the later reads share it — the whole point.
+    const persistentSession = isMcpRemoteProxy(server) || Boolean(server.backendPrefix);
+    let authIncomplete;
+    if (mode === "safe" && loginTool && persistentSession) {
+        const preflight = tools.find((t) => classifyTool(t, labelSignal).callable);
+        if (preflight) {
+            const first = await probe(preflight.name, {});
+            // The unauthenticated answer, normalised — kite says "Failed to execute get_gtts" with
+            // ok=true, so phrase-lists misread it (the first cut called that signed-in and burned a
+            // run: 0/60 with the human never asked). Auth is COMPLETE only when the same read's
+            // answer CHANGES from this shape.
+            const unauthedShape = (r) => (r.ok ? r.obs.resultText : r.detail ?? "").trim().slice(0, 120);
+            const firstShape = unauthedShape(first);
+            const failed = !first.ok || authFailureShaped(first.ok ? first.obs.resultText : "");
+            if (failed) {
+                const login = await probe(loginTool.name, {});
+                const url = login.ok ? firstUrlIn(login.obs.resultText) : null;
+                if (url) {
+                    emit({ type: "auth-needed", server: server.name, tool: loginTool.name, url });
+                    let authed = false;
+                    for (let i = 0; i < 30; i++) {
+                        await new Promise((r) => setTimeout(r, 10_000));
+                        const again = await probe(preflight.name, {});
+                        if (signInComplete(firstShape, unauthedShape(again), again.ok, again.ok ? again.obs.resultText : "")) {
+                            authed = true;
+                            break;
+                        }
+                    }
+                    emit(authed ? { type: "auth-ok", server: server.name }
+                        : { type: "auth-timeout", server: server.name });
+                    if (!authed) {
+                        authIncomplete =
+                            "sign-in never completed (auth-timeout) — every read answered as " +
+                                "unauthenticated, so nothing behavioural was proven";
+                    }
+                }
+                else {
+                    authIncomplete =
+                        "reads answer as unauthenticated and the server has a login tool, but no " +
+                            "sign-in URL could be obtained from it — nothing behavioural was proven";
+                }
+            }
+        }
+    }
+    const noisyAxes = [
+        ...(labelSignal.destructiveInformative ? [] : ["destructiveHint:true on every tool"]),
+        ...(labelSignal.readOnlyVetoInformative ? [] : ["readOnlyHint:false on every tool"]),
+    ];
+    const labelNoiseNote = noisyAxes.length > 0
+        ? `blanket labels ignored as uninformative (${noisyAxes.join("; ")}) — a label that never ` +
+            `varies carries no information and would let a server evade behavioural verification; ` +
+            `name-read tools were exercised, name-mutating tools stayed skipped`
+        : undefined;
     try {
-        for (const tool of tools) {
+        // Consecutive tools whose PROCESS failed to start. Two in a row with nothing on this server
+        // completed means the server is not going to come up; stop spending a container per check.
+        let startupFailures = 0;
+        for (const [toolIndex, tool] of tools.entries()) {
             // Safe mode (default): NEVER invoke a tool that could mutate state or move money.
             if (mode === "safe") {
-                const { klass, callable } = classifyTool(tool);
+                const { klass, callable } = classifyTool(tool, labelSignal);
                 if (!callable) {
                     skipped.push({ tool: tool.name, klass });
                     emit({ type: "skip", server: server.name, tool: tool.name, klass });
@@ -242,11 +415,31 @@ export async function verifyServer(server, opts = {}) {
                 serverName: server.name,
                 attempts,
                 emit,
+                budget,
             });
             findings.push(...res.findings);
             checkErrors.push(...res.checkErrors);
             checksPlanned += res.checksPlanned;
             checksCompleted += res.checksCompleted;
+            if (res.startupFailed) {
+                startupFailures += 1;
+                if (startupFailures >= 2 && checksCompleted === 0) {
+                    const reason = res.startupDetail ?? "the server failed to start";
+                    emit({
+                        type: "server-abandoned",
+                        server: server.name,
+                        tool: tool.name,
+                        failedToStart: startupFailures,
+                        toolsRemaining: tools.length - toolIndex - 1,
+                        reason,
+                    });
+                    throw new Error(`abandoned after ${startupFailures} tools in a row could not start the server and ` +
+                        `no check completed — ${reason}`);
+                }
+            }
+            else if (res.checksCompleted > 0) {
+                startupFailures = 0;
+            }
         }
         // F4: drive the executor to probe each hidden tool the same way — synthesise args against the
         // HIDDEN tool's own schema, wrapped into the executor envelope by `dispatchedProbe`, so the
@@ -271,7 +464,7 @@ export async function verifyServer(server, opts = {}) {
                         inputSchema: hidden.inputSchema,
                     };
                     if (mode === "safe") {
-                        const { klass, callable } = classifyTool(hiddenTool);
+                        const { klass, callable } = classifyTool(hiddenTool, labelSignal);
                         if (!callable) {
                             skipped.push({ tool: hidden.name, klass });
                             emit({ type: "skip", server: server.name, tool: hidden.name, klass });
@@ -279,7 +472,7 @@ export async function verifyServer(server, opts = {}) {
                         }
                     }
                     const attribution = `${hidden.name} via ${executor.name}`;
-                    const res = await runToolChecks(hiddenTool, checks, dprobe, { serverName: server.name, attempts, emit }, attribution);
+                    const res = await runToolChecks(hiddenTool, checks, dprobe, { serverName: server.name, attempts, emit, budget }, attribution);
                     findings.push(...res.findings);
                     checkErrors.push(...res.checkErrors);
                     checksPlanned += res.checksPlanned;
@@ -311,6 +504,8 @@ export async function verifyServer(server, opts = {}) {
         pins: pinInventory(server.name, tools),
         sandboxBackend,
         sandboxDegradedReason,
+        labelNoiseNote,
+        authIncomplete,
         dynamicDispatch: dynamicDispatch.length > 0 ? dynamicDispatch : undefined,
         hiddenCatalog: hiddenCatalog.length > 0 ? hiddenCatalog : undefined,
         hiddenProbed: hiddenProbed.length > 0 ? hiddenProbed : undefined,

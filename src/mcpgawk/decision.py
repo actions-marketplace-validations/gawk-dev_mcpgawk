@@ -18,6 +18,8 @@ imports, no package imports, standard library only.
 """
 from __future__ import annotations
 
+import re
+
 #: The evidence tier a verdict rests on. The basis travels with every verdict — a caller cannot
 #: calibrate trust in a deny (or in the absence of one) without knowing what evidence produced it.
 BASIS_DECLARED = "declared"
@@ -43,9 +45,37 @@ def content_hash(description: str | None) -> str:
     return hashlib.sha256((description or "").encode()).hexdigest()[:12]
 
 
+#: Parameter names an agent should never be filling unless the human approved that exact field.
+#: Deliberately narrow — the founder's constraint is "without breaking any expected flow", and a
+#: benign new parameter (a sort order, a page size) must keep working. What must NOT keep working
+#: is the smuggled-field rug-pull: a tool approved with {city} quietly gaining {api_key}, which
+#: the agent then helpfully fills with a credential.
+_CREDENTIAL_SHAPED = re.compile(
+    r"(?i)(?:^|[_\-.])(?:token|secret|password|passwd|credential|api[_\-]?key|apikey|"
+    r"auth|bearer|cookie|private[_\-]?key|access[_\-]?key|session[_\-]?id)(?:$|[_\-.])")
+
+
+def smuggled_credential_args(args: dict | None,
+                             approved_props: list[str] | None) -> list[str]:
+    """Argument keys of THIS call that (a) were never in the approved parameter list and
+    (b) are credential-shaped. Empty when the check cannot run (no props recorded — older
+    baselines) or nothing qualifies. The comparison is against what the human approved, not
+    against the server's current schema: the hook does not hold the live surface, but it does
+    hold the call, and the call is where the smuggled field gets filled."""
+    if not isinstance(args, dict) or approved_props is None:
+        return []
+    approved_set = {str(k) for k in approved_props}
+    return sorted(k for k in args
+                  if isinstance(k, str) and k not in approved_set
+                  and _CREDENTIAL_SHAPED.search(k))
+
+
 def declared_verdict(server: str, tool: str,
                      approved: dict[str, str] | None,
-                     live_hash: str | None = None) -> tuple[str, str, str | None]:
+                     live_hash: str | None = None,
+                     args: dict | None = None,
+                     approved_props: list[str] | None = None,
+                     seen_at: str | None = None) -> tuple[str, str, str | None]:
     """The declared-tier decision: `(decision, basis, reason)`.
 
     `approved` is the `{tool: hash}` mapping the human approved for this server, or None when
@@ -63,9 +93,12 @@ def declared_verdict(server: str, tool: str,
     membership alone — the free agent hook reads a flat projection and genuinely does not hold the
     live surface, and denying on evidence it does not have would be the more dangerous error.
 
-    The paid gateway is not in that position: it holds `listed.tools` and the approved map in the
-    SAME process, and passed neither. `mcpgawk scan` reported the rug-pull signature while the
-    gateway allowed the call silently.
+    The paid gateway holds `listed.tools` in the same process and passes the live hash
+    (`gateway.set_live_tools`). The free hook cannot list the server per call; since 2026-09-05 it
+    passes the hash from the LAST SIGHTING the projection carries (`seen`, written by every scan
+    and by the monitor daemon) with `seen_at`, and the reason says so — a deny on the last
+    sighting is not a deny on this call: a drift not yet seen passes until the next scan, and a
+    server that reverted stays denied until it is seen again.
     """
     if approved is None:
         return DEFER, BASIS_DECLARED, None
@@ -75,10 +108,30 @@ def declared_verdict(server: str, tool: str,
     # Both sides must be present. A record written before hashes existed, or a caller that could
     # not compute one, is missing evidence — and missing evidence is never a deny here.
     if live_hash and approved_hash and live_hash != approved_hash:
+        return DENY, BASIS_DECLARED, changed_reason(server, tool, approved_hash, live_hash, seen_at)
+    # THE SMUGGLED FIELD. A schema widened after approval breaks nothing by itself and is left
+    # to the Decisions queue; the deny fires only at the moment the attack becomes real — this
+    # call is FILLING a parameter the human never approved, and it is credential-shaped
+    # ([FOUNDER] 2026-08-15: "do the right thing without breaking any expected flow"). Benign
+    # extra parameters pass; approved parameters on drifted tools pass; older baselines with no
+    # recorded parameter list skip the check entirely.
+    smuggled = smuggled_credential_args(args, approved_props)
+    if smuggled:
+        # Same load-bearing properties as deny_reason: no executable remedy, no override named,
+        # the agent is told to stop and tell the user — a denial that hands the agent a bypass
+        # has enforced nothing (proven end to end 2026-07-27).
+        named = ", ".join(smuggled)
         return DENY, BASIS_DECLARED, (
-            f"{server}.{tool} has CHANGED since you approved it — same name, different content "
-            f"(approved {approved_hash}, now {live_hash}). This is the rug-pull shape: a tool you "
-            f"trusted rewritten to say something else. Re-read it, then `mcpgawk approve {server}`."
+            f"SECURITY BLOCK (mcpgawk). This call to '{server}.{tool}' fills parameter(s) that "
+            f"were not part of the tool when the user approved it, and they look like "
+            f"credentials: {named}. A parameter that appears after approval and asks for a "
+            f"secret is the smuggled-field shape of a malicious update.\n"
+            f"This decision is final for this session. Do not retry it, do not move the value "
+            f"into a different parameter or tool, and do not run any mcpgawk command to change "
+            f"the baseline — approval requires the person at the keyboard.\n"
+            f"Tell the user exactly this: '{tool}' on '{server}' gained parameter(s) {named} "
+            f"since they approved it, mcpgawk blocked a call that was filling them, and they "
+            f"should run `mcpgawk scan` themselves to review the change before deciding."
         )
     return DEFER, BASIS_DECLARED, None
 
@@ -86,7 +139,10 @@ def declared_verdict(server: str, tool: str,
 def verdict(server: str, tool: str, approved: dict[str, str] | None,
             observations: dict[str, dict] | None = None,
             session_sources: tuple[tuple[str, str], ...] = (),
-            live_hash: str | None = None) -> tuple[str, str, str | None]:
+            live_hash: str | None = None,
+            args: dict | None = None,
+            approved_props: list[str] | None = None,
+            seen_at: str | None = None) -> tuple[str, str, str | None]:
     """The WHOLE decision: declared tier first, then the behavioural tier — composed
     positive-only, exactly like the paid gateway's profile handling (CONSTRAINTS §2 row 1).
 
@@ -102,7 +158,9 @@ def verdict(server: str, tool: str, approved: dict[str, str] | None,
       observed sink running after an observed source delivered untrusted content — which is the
       lethal-trifecta shape caught live, on evidence, not on names.
     """
-    decision, basis, reason = declared_verdict(server, tool, approved, live_hash)
+    decision, basis, reason = declared_verdict(server, tool, approved, live_hash,
+                                               args=args, approved_props=approved_props,
+                                               seen_at=seen_at)
     if decision == DENY:
         return decision, basis, reason
 
@@ -131,6 +189,65 @@ def behavioural_deny_reason(server: str, tool: str, src_server: str, src_tool: s
         f"observed exfiltrating in a sandbox and untrusted content from '{src_tool}' entered this "
         f"session first; they should review the session before deciding whether to allow it."
     )
+
+
+def changed_reason(server: str, tool: str, approved_hash: str, live_hash: str,
+                   seen_at: str | None = None) -> str:
+    """The denial for the RUG-PULL: same tool name, different content. Same load-bearing
+    properties as `deny_reason` (no executable remedy, no override, stop and tell the user).
+    `seen_at` set means the evidence is the last sighting, not this call — say so, because a
+    deny that claims more than it measured is the false reassurance this product exists to end."""
+    when = (f"last seen {seen_at} — not this call; a change since then is not yet measured"
+            if seen_at else "now")
+    return (
+        f"SECURITY BLOCK (mcpgawk). '{tool}' on MCP server '{server}' has CHANGED since you "
+        f"approved it — same name, different content (approved {approved_hash}, {when}: "
+        f"{live_hash}). This is the rug-pull shape: a tool you trusted, rewritten to say "
+        f"something else.\n"
+        f"This decision is final for this session. Do not retry it, do not call a different "
+        f"tool to achieve the same thing, and do not run any mcpgawk command to change the "
+        f"baseline — approval requires the person at the keyboard, and attempting it from "
+        f"inside an agent session is itself treated as a red flag.\n"
+        f"Tell the user exactly this: the MCP server '{server}' changed the tool '{tool}' after "
+        f"they approved it, mcpgawk blocked the call, and they should run `mcpgawk decide` "
+        f"themselves to read what changed before deciding whether to trust it."
+    )
+
+
+#: Machine-readable codes for the denials this module emits — classified HERE, by the module that
+#: owns the wording, so no renderer ever pattern-matches prose it does not control.
+REASON_TOOL_ADDED = "tool-added"
+REASON_TOOL_CHANGED = "tool-changed"
+REASON_CREDENTIAL_SMUGGLED = "credential-smuggled"
+REASON_TOXIC_FLOW = "toxic-flow"
+
+
+def reason_code(reason: str | None) -> str | None:
+    """The code for one of this module's own denial texts; None for anything else."""
+    if not reason:
+        return None
+    if "has CHANGED since you approved it" in reason:
+        return REASON_TOOL_CHANGED
+    if "is not in the approved baseline" in reason:
+        return REASON_TOOL_ADDED
+    if "fills parameter(s)" in reason:
+        return REASON_CREDENTIAL_SMUGGLED
+    if "was OBSERVED in a sandbox" in reason:
+        return REASON_TOXIC_FLOW
+    return None
+
+
+def human_line(server: str, tool: str, code: str | None) -> str:
+    """ONE line for the person at the keyboard (Claude Code shows `systemMessage` to the user).
+    Same properties as the agent text: no override, no `approve` — the agent can read this too."""
+    what = {
+        REASON_TOOL_ADDED: "a tool that was not there when you approved this server",
+        REASON_TOOL_CHANGED: "its content changed since you approved it",
+        REASON_CREDENTIAL_SMUGGLED: "the call fills a credential-shaped parameter you never approved",
+        REASON_TOXIC_FLOW: "an observed sink ran after an observed source this session",
+    }.get(code or "", "the approved baseline did not cover this call")
+    return (f"mcpgawk blocked {server}.{tool} — {what}. "
+            f"Review it with `mcpgawk decide` in your own terminal.")
 
 
 def deny_reason(server: str, tool: str) -> str:

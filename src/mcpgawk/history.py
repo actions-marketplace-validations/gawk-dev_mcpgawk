@@ -165,12 +165,26 @@ def require_human_approval() -> None:
 
 
 def load(path: str | None = None) -> dict[str, Any]:
+    return load_checked_hardened(path)[0]
+
+
+def load_checked_hardened(path: str | None = None) -> tuple[dict[str, Any], str | None]:
+    """`load_checked` plus the tighten-on-read that `load()` performs — in ONE place.
+
+    Tighten on READ as well as write. A file created by an older version stays world-readable
+    until something rewrites it, and a user who only ever reads (a `runs` or `baseline` call)
+    would keep the exposure indefinitely. Cheap, and it converges every install on first touch.
+
+    Split out for callers that need BOTH the harden and the read error: `spine.approved_pin`
+    treated "the store raised" as its unreadable signal, but this layer never raises — the error
+    travels in the tuple — so the trust-on-first-use refusal was dead code on the one failure it
+    was written for. A caller reading through `load()` gets the `[0]` that discards the error;
+    a caller pairing `state.harden` with `load_checked` by hand is the second copy of a rule
+    that then drifts. This is the single door for "harden, read, and keep the reason".
+    """
     path = path or default_path()
-    # Tighten on READ as well as write. A file created by an older version stays world-readable
-    # until something rewrites it, and a user who only ever reads (a `runs` or `baseline` call)
-    # would keep the exposure indefinitely. Cheap, and it converges every install on first touch.
     state.harden(path)
-    return load_checked(path)[0]
+    return load_checked(path)
 
 
 def load_checked(path: str | None = None) -> tuple[dict[str, Any], str | None]:
@@ -188,7 +202,12 @@ def load_checked(path: str | None = None) -> tuple[dict[str, Any], str | None]:
     path = path or default_path()
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f), None
+            store = json.load(f)
+        # A store written before the synthetic-alias gate still carries placeholders. Shed them
+        # HERE so every alias reader gets the cleaned view, not just the ones that also save.
+        if isinstance(store, dict):
+            _shed_synthetic_aliases(store)
+        return store, None
     except FileNotFoundError:
         return {"servers": {}}, None            # a fresh machine: genuinely nothing approved yet
     except json.JSONDecodeError as exc:
@@ -203,8 +222,81 @@ def load_checked(path: str | None = None) -> tuple[dict[str, Any], str | None]:
         )
 
 
+#: The item-key shape drift mints: `tool.<name>`, `prompt.<name>`, `resource.<uri>`. The IDENT half
+#: is server-controlled, and until 2026-08-13 it went to disk verbatim while only the description
+#: text was redacted — so a tool NAMED with a credential, or the ordinary shape of a URI-only
+#: resource (`https://host/doc?apiKey=…`), wrote a live key into `history.json` as a MAP KEY, in
+#: `texts`, `items`, `tools`, `schemas`, `props` and `annotations` at once.
+_KIND_PREFIX = ("tool.", "prompt.", "resource.")
+
+
+def _mask_ident(ident: str) -> str:
+    """Mask a credential inside one item identity, shape-preserving.
+
+    URL-shaped idents go through `redact_url` (keeps the host and the parameter NAMES, so a drift
+    report can still say WHICH resource changed); everything else through the prose redactor.
+    Idempotent: a masked ident carries no credential shape, so re-masking is a no-op — which is
+    what lets this run at both ingress and the write without compounding.
+    """
+    from .redact import redact_ident
+    kind, _, rest = ident.partition(".")
+    if f"{kind}." in _KIND_PREFIX and rest:
+        return f"{kind}.{_mask_ident(rest)}"
+    return redact_ident(ident)
+
+
+def redact_record(rec: dict[str, Any]) -> dict[str, Any]:
+    """Mask credential shapes in one record, IN PLACE. Field-aware, never a whole-blob pass.
+
+    ADR-0012 says redaction happens at the persistence boundary. It did not: the only `redact()`
+    call lived in `drift._item_texts`, one caller, covering descriptions alone — the seventh
+    instance of this repo's most repeated defect, a rule living in one file instead of on the write.
+
+    A whole-blob `redact()` is deliberately NOT what this does. The store holds identity the drift
+    report must show verbatim — pins, item hashes, timestamps — and this module's own doctrine is
+    that over-redaction destroys the evidence the feature exists to display (`fleet.py` records an
+    attempt at exactly that, backed out because it mangled ordinary paths). So: map KEYS are item
+    identities and go through `_mask_ident`; prose VALUES (`texts`, annotation values, property
+    names) go through the prose redactor; hashes and scalars are left alone.
+
+    Applied at BOTH `record()` ingress and `save()`. Ingress masks the caller's own object in place
+    so the record that gets compared for drift is the same one that gets stored — mask only on the
+    way to disk and every scan would diff a raw `current` against a masked baseline and report a
+    rename that never happened. `save()` then catches every other writer, present and future
+    (`baseline.approve` writes measured annotations through its own direct save).
+    """
+    from .redact import redact
+    for field, value in list(rec.items()):
+        if not isinstance(value, dict):
+            continue
+        masked: dict[str, Any] = {}
+        for k, v in value.items():
+            if isinstance(v, str) and field == "texts":
+                v = redact(v) or v
+            elif isinstance(v, dict):
+                # annotations: {ident: {title: "…"}} — server-authored prose, one level down.
+                v = {ak: (redact(av) or av) if isinstance(av, str) else av for ak, av in v.items()}
+            elif isinstance(v, list):
+                # props: {ident: [property names]} — server-chosen names, same trust as an ident.
+                v = [(_mask_ident(i) if isinstance(i, str) else i) for i in v]
+            masked[_mask_ident(k) if isinstance(k, str) else k] = v
+        rec[field] = masked
+    return rec
+
+
 def save(store: dict[str, Any], path: str | None = None) -> None:
     path = path or default_path()
+    # THE persistence boundary — every writer lands here (record, approve, baseline). Masking here
+    # rather than in each caller is the whole point: a rule that lives in one caller is not a rule.
+    # The same argument carries the alias shed: converge the FILE, so a store repaired in memory by
+    # one read does not go back to disk carrying the placeholders again.
+    _shed_synthetic_aliases(store)
+    for entry in (store.get("servers") or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        for rec in [entry.get("approved"), *(entry.get("history") or [])]:
+            if isinstance(rec, dict):
+                redact_record(rec)
     # Owner-only: this file is a complete inventory of the user's MCP servers and their tool
     # descriptions. It was world-readable until 2026-07-27 — see state.py.
     state.secure_dir(os.path.dirname(path))
@@ -267,6 +359,8 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
     Best-effort but never silent: a failure here means the hook will (loudly) defer until the next
     successful save, which is the safe direction — it must not fail the scan/approve that called us.
     """
+    from . import drift     # local: keeps the module graph acyclic, as drift does for signals
+
     try:
         st = os.stat(path)
         servers: dict[str, Any] = {}
@@ -276,8 +370,60 @@ def _write_projection(store: dict[str, Any], path: str) -> None:
             rec = entry.get("approved")
             if not isinstance(rec, dict) or not isinstance(rec.get("tools"), dict):
                 continue
-            servers[key] = {"tools": dict(rec["tools"]),
-                            "aliases": list(entry.get("aliases") or [])}
+            # NOT skipped on an unreadable `schema_version`. That was tried and reverted the same
+            # day: omitting a server makes the hook read "never approved", which DEFERS — i.e.
+            # allows every call on it — where the previous behaviour denied (hashes from another
+            # algorithm cannot match). Worse, the omission is undetectable: this function stamps
+            # `source` with the current store stat, so the staleness check passes and the hook
+            # trusts a projection it cannot know is partial. A loud refusal in the report path plus
+            # a silent fail-open in the enforce path is the worst combination available.
+            # Covering the enforcing reader properly needs the projection to CARRY the refusal
+            # (so the hook can deny loudly rather than infer from absence) — see HANDOFF.
+            row = {"tools": dict(rec["tools"]),
+                   "aliases": list(entry.get("aliases") or [])}
+            # THE LAST SIGHTING, so the hook can deny the rug-pull it could never see: the hook
+            # cannot list a server per call, but every scan and every monitor tick already writes
+            # a full record into `history[]`. Its `{tool: hash}` and `measured_at` ride along as
+            # `seen`/`seen_at`; the decision core compares `seen[tool]` against the approved hash
+            # and the reason names the sighting time — a deny on the last sighting, not on this
+            # call (2026-09-05, slice 1 of docs/plan-mcpgawk-fit-readiness-friction-2026-09-05.md).
+            # Absent when the server has no sighting at all: an older projection reads the same.
+            approved_at = entry.get("approved_at")
+            if isinstance(approved_at, str):
+                row["approved_at"] = approved_at      # for the confidence line; absent = not recorded
+            sightings = entry.get("history")
+            last = sightings[-1] if isinstance(sightings, list) and sightings else None
+            if isinstance(last, dict) and isinstance(last.get("tools"), dict):
+                row["seen"] = dict(last["tools"])
+                measured = last.get("measured_at")
+                if isinstance(measured, str):
+                    row["seen_at"] = measured
+            # The APPROVED parameter names per tool, so the hook can catch the smuggled-field
+            # rug-pull at call time: a schema widened after approval breaks nothing by itself,
+            # but an agent FILLING a parameter the human never approved — and one shaped like a
+            # credential — is the attack becoming real ([FOUNDER] 2026-08-15: "do the right
+            # thing without breaking any expected flow"). Absent props (older records) simply
+            # skip the check.
+            props = rec.get("props")
+            if isinstance(props, dict):
+                row["props"] = {ident[len("tool."):]: list(v)
+                                for ident, v in props.items()
+                                if isinstance(ident, str) and ident.startswith("tool.")
+                                and isinstance(v, list)}
+            # CARRY the refusal rather than implying it by absence. A record this build cannot
+            # interpret must neither be enforced (its hashes were computed by rules we do not know)
+            # nor silently omitted (absent reads as "never approved", which DEFERS = allows, and the
+            # hook cannot tell a partial projection from a complete one because `source` still
+            # stamps fresh). Emitting the server with an explicit reason and NO tools lets the hook
+            # say why it is standing down.
+            stored = rec.get("schema_version")
+            if stored is not None and (not isinstance(stored, int)
+                                       or stored > drift.RECORD_SCHEMA):
+                row = {"tools": {}, "aliases": row["aliases"],
+                       "unreadable": (f"its approved record was written by a newer mcpgawk "
+                                      f"(record schema {stored!r}; this build reads "
+                                      f"{drift.RECORD_SCHEMA})")}
+            servers[key] = row
         projection = {"schema": PROJECTION_SCHEMA,
                       "source": {"mtime_ns": st.st_mtime_ns, "size": st.st_size},
                       "servers": servers}
@@ -327,7 +473,9 @@ def locked(path: str | None = None):
         except (ImportError, AttributeError, OSError):
             try:
                 import msvcrt
-                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                # Windows-only module: a checker running on POSIX sees no attributes on it at all,
+                # which is the same fact this branch already exists to handle.
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)   # type: ignore[attr-defined]
             except Exception:      # noqa: BLE001 — no lock available; proceed unserialised
                 pass
         yield
@@ -339,6 +487,51 @@ def locked(path: str | None = None):
                 fh.close()         # closing releases both flock and msvcrt locks
             except OSError:
                 pass
+
+
+#: Names an ad-hoc scan invents for a target that HAS no config name (`--http`, `--stdio`,
+#: `--sse`). They are labels for one run, never identities, and they must never be recorded as
+#: aliases: the same placeholder is reused for every ad-hoc scan, so it accumulates on unrelated
+#: servers and then names none of them. Measured on the founder's store 2026-08-27 —
+#: `cli-http` was an alias on BOTH `mcp:Kite MCP Server` and `mcp:Notion MCP`, so
+#: `resolve("cli-http")` returned None: an approve by that name could not land anywhere, and the
+#: alias table said two different servers answered to one word.
+#:
+#: Gated HERE, at the write, and not in the callers: every path that records a sighting goes
+#: through this function, and a rule enforced in one caller is a rule the next caller will miss.
+SYNTHETIC_NAMES = frozenset({"cli-http", "cli-stdio", "cli-sse"})
+
+
+def _shed_synthetic_aliases(store: dict[str, Any]) -> int:
+    """Strip placeholder labels from every record's alias list. Returns how many were removed.
+
+    THE WRITE GATE CAME LATER THAN THE DATA. `record` has refused to write a `SYNTHETIC_NAMES`
+    alias since 2026-08-27, but stores written before it keep what they already had — measured on
+    the founder's machine 2026-09-02: `cli-stdio` sat on FOUR records (`driftling`, `mcpgawk`,
+    `notes-pro`, `secure-filesystem-server`). A gate on new writes does nothing about them.
+
+    WHY IT IS NOT INERT, though today it looks it. Four records answering to one word makes
+    `resolve` return None, so nothing lands — which reads as harmless. It is one deletion away from
+    harm: drop three of those servers and the word resolves to the SURVIVOR, and
+    `mcpgawk approve cli-stdio` then moves a baseline the operator never meant to touch, silently.
+    The hazard is not the collision; it is the collision ENDING.
+
+    Both doors, deliberately. On READ so every alias reader — the panel, the fleet rows, the
+    protect report, `baseline.export`, the guard hook's projection — is covered by one change
+    instead of fourteen; on WRITE so the file itself converges the first time anything saves.
+    """
+    shed = 0
+    for entry in (store.get("servers") or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        aliases = entry.get("aliases")
+        if not isinstance(aliases, list):
+            continue
+        kept = [a for a in aliases if a not in SYNTHETIC_NAMES]
+        if len(kept) != len(aliases):
+            shed += len(aliases) - len(kept)
+            entry["aliases"] = kept
+    return shed
 
 
 def record(key: str, rec: dict[str, Any], path: str | None = None,
@@ -359,14 +552,27 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
     baseline and `None` is returned, so a first scan never reports drift against itself.
     """
     path = path or default_path()
+    # IN PLACE, before anything compares it: the caller keeps this same object and diffs it against
+    # the baseline this function returns. Masking only on the way to disk would diff a raw `current`
+    # against a masked baseline and report a rename on every scan of a credentialled server.
+    redact_record(rec)
     with locked(path):
         store = load(path)
-        _migrate(store, key, migrate_from)
+        adopted = _migrate(store, key, migrate_from, alias)
         base = approved(store, key)
         entry = server_entry(store, key)
         if base is None:
             entry["approved"] = rec          # trust-on-first-use
-        if alias:
+        if adopted:
+            # AN ADOPTED RECORD'S ALIASES MAY NAME OTHER SERVERS. A record conflated under the old
+            # identity carries the config name of EVERY entry that shared it — so keeping them here
+            # would let the bug survive its own fix: until the sibling entry is itself re-scanned,
+            # the guard's alias lookup would single-match this record and enforce a baseline the
+            # sibling's owner never reviewed. Only the entry actually claiming the record keeps its
+            # name; a claim with no alias to attribute keeps none, because a name we cannot
+            # attribute is exactly the thing that must not resolve.
+            entry["aliases"] = [alias] if alias else []
+        if alias and alias not in SYNTHETIC_NAMES:
             # The key is the server's asserted identity; the user thinks in config names. Remember
             # every name this server has been configured under so `approve <name>` resolves.
             entry["aliases"] = sorted(set(entry.get("aliases", [])) | {alias})
@@ -375,7 +581,8 @@ def record(key: str, rec: dict[str, Any], path: str | None = None,
     return base
 
 
-def approve(key: str, path: str | None = None) -> dict[str, Any] | None:
+def approve(key: str, path: str | None = None, *,
+            expect_pin: str | None = None) -> dict[str, Any] | None:
     """Adopt the most recent sighting of `key` as the approved baseline. Returns it.
 
     The explicit acknowledgement ADR-0012 requires. Until this runs, drift keeps reporting — and
@@ -392,9 +599,99 @@ def approve(key: str, path: str | None = None) -> dict[str, Any] | None:
         latest = last(store, key)
         if latest is None:
             return None
-        server_entry(store, key)["approved"] = latest
+        # ADOPT WHAT WAS REVIEWED, NOT WHAT IS NEWEST. `mcpgawk monitor approve` accepts the
+        # snapshot the operator looked at; between that look and this write the daemon may have
+        # recorded a newer sighting. Refusing inside the lock is the only place the check is
+        # airtight (2026-09-04, ledger 109).
+        if expect_pin is not None and str(latest.get("pin") or "") != str(expect_pin):
+            return None
+        entry = server_entry(store, key)
+        entry["approved"] = latest
+        # PROVENANCE. `cli status` has printed `approved —` since the field it reads was never
+        # written (2026-09-03); and "approved when, by whom" is the first thing a security team
+        # asks of a baseline ("Approved May 18 · By: Security Admin"). Single operator today, so
+        # `by` is the OS user at this host — honest, and the slot RBAC fills later.
+        entry["approved_at"] = _now_iso()
+        entry["approved_by"] = _operator()
         save(store, path)
     return latest
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _operator() -> str:
+    """`user@host` for the person running this command. Never a secret, never guessed."""
+    import getpass
+    import socket
+    try:
+        user = getpass.getuser()
+    except Exception:                                  # noqa: BLE001 — no passwd entry
+        user = "unknown"
+    return f"{user}@{socket.gethostname().split('.')[0]}"
+
+
+def approval_provenance(store: dict[str, Any], key: str) -> tuple[str | None, str | None]:
+    """(approved_at, approved_by) for a server, or (None, None) — absent is stated, not invented:
+    a baseline approved before these fields existed says so rather than borrowing its
+    measurement time."""
+    e = (store.get("servers") or {}).get(key) or {}
+    at, by = e.get("approved_at"), e.get("approved_by")
+    return (at if isinstance(at, str) else None), (by if isinstance(by, str) else None)
+
+
+def changed_within(store: dict[str, Any], days: int = 7,
+                   now: "float | None" = None) -> list[tuple[str, str]]:
+    """Servers whose surface first MOVED from its approved pin within the last `days`, as
+    `(key, first_changed_at)`. The fleet change rate an operator reads at a glance ("Changes
+    (7d): 12"), computed from the sightings already in the store — no new measurement.
+
+    "First moved" is the earliest sighting after the approval whose pin differs; a server that
+    changed three weeks ago and again yesterday counts by its first move, because the question
+    is "what started needing me this week", not "what is still pending".
+
+    HONEST ABOUT RETENTION: the store keeps a bounded number of sightings. If the OLDEST kept
+    sighting after the approval already differs, the first move happened at or before it and
+    cannot be dated — such a server is left OUT rather than dated by whatever survived
+    (browserstack, scanned daily, would otherwise have read "changed this week" for a change
+    from 19 days earlier, 2026-09-03). A move counts only when a kept sighting AT the approved
+    pin precedes the first differing one.
+    """
+    import time as _time
+    from datetime import datetime, timezone
+    horizon = (now if now is not None else _time.time()) - days * 86400
+    out: list[tuple[str, str]] = []
+    for key, e in (store.get("servers") or {}).items():
+        if not isinstance(e, dict):
+            continue
+        approved = e.get("approved")
+        if not isinstance(approved, dict) or not approved.get("pin"):
+            continue
+        since = str(approved.get("measured_at") or "")
+        seen_at_pin = False
+        for sighting in e.get("history") or []:
+            if not isinstance(sighting, dict):
+                continue
+            at = str(sighting.get("measured_at") or "")
+            if at < since:
+                continue
+            if sighting.get("pin") == approved.get("pin"):
+                seen_at_pin = True
+                continue
+            if not seen_at_pin:
+                break                               # first move predates what was kept: undatable
+            try:
+                ts = datetime.fromisoformat(at.replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            except ValueError:
+                break
+            if ts.timestamp() >= horizon:
+                out.append((key, at))
+            break                                   # the FIRST move decides; later ones do not
+    return sorted(out, key=lambda kv: kv[1], reverse=True)
 
 
 def mute_finding(name: str, finding_id: str, path: str | None = None,
@@ -447,16 +744,38 @@ def resolve(store: dict[str, Any], wanted: str) -> str | None:
 
     They know the name in their `mcp.json`; the store is keyed by the identity the server asserts.
     Accepts the exact key, a recorded config-name alias, or the bare asserted name.
+
+    None when nothing matches AND when the name is AMBIGUOUS — an alias of several records. This
+    used to take the first match, which is the write-side twin of the bug the enforcing reader
+    already defers on: an operator typing `mcpgawk approve billing` would move the approved baseline
+    of whichever record happened to sort first, and nothing would say so.
+
+    The routine source of collisions was the placeholder every ad-hoc scan reused (`cli-stdio` and
+    friends). Those are refused outright now — see `resolve_all` and `_shed_synthetic_aliases` —
+    so a genuine collision means two config entries really do share a name, which is rare and worth
+    refusing loudly. Callers that need to explain the ambiguity use `resolve_all`.
     """
+    matches = resolve_all(store, wanted)
+    return matches[0] if len(matches) == 1 else None
+
+
+def resolve_all(store: dict[str, Any], wanted: str) -> list[str]:
+    """Every stored key `wanted` could mean. Same order as `resolve`: exact key, then the bare
+    asserted name, then config-name aliases. An exact match is unambiguous by construction — only
+    the alias scan can return several."""
     servers = store.get("servers", {})
     if wanted in servers:
-        return wanted
+        return [wanted]
     if f"mcp:{wanted}" in servers:
-        return f"mcp:{wanted}"
-    for key, entry in servers.items():
-        if wanted in entry.get("aliases", []):
-            return key
-    return None
+        return [f"mcp:{wanted}"]
+    if wanted in SYNTHETIC_NAMES:
+        # A PLACEHOLDER NEVER NAMES A SERVER. `--stdio`/`--http`/`--sse` scans all label their one
+        # target the same way, so the word belongs to no server in particular. Refusing it here is
+        # the invariant that does not depend on the data being clean: an old store still carrying
+        # `cli-stdio` on a single record would otherwise single-match, and `approve cli-stdio`
+        # would move a baseline the operator never named.
+        return []
+    return [key for key, entry in servers.items() if wanted in (entry.get("aliases") or [])]
 
 
 def identity_change(store: dict[str, Any], key: str, alias: str | None) -> str | None:
@@ -498,10 +817,11 @@ def display_name(store: dict[str, Any], key: str) -> str:
         return key
     primary = aliases[0]
 
-    # AMBIGUITY IS WORSE THAN THE RAW KEY. Two different servers can carry the same alias — every
-    # `--stdio` scan is labelled `cli-stdio`, so a fleet can show two rows reading identically.
-    # A user then cannot tell which one changed, and `mcpgawk approve cli-stdio` is a coin flip.
-    # Where the name does not identify one server, say which one.
+    # AMBIGUITY IS WORSE THAN THE RAW KEY. Two different servers can carry the same alias, and a
+    # fleet then shows two rows reading identically: a user cannot tell which one changed, and
+    # `approve <that name>` is a coin flip. The routine source of this — the placeholder every
+    # ad-hoc scan reused — is gone (`_shed_synthetic_aliases`), so what is left is two config
+    # entries genuinely sharing a name. Rarer, and still worth saying out loud.
     sharing = [k for k, v in servers.items()
                if k != key and primary in ((v or {}).get("aliases") or [])]
     if sharing:
@@ -512,11 +832,24 @@ def display_name(store: dict[str, Any], key: str) -> str:
 
 
 def pending(store: dict[str, Any]) -> list[str]:
-    """Keys whose newest sighting differs from the approved baseline — i.e. unacknowledged drift."""
+    """Keys whose newest sighting differs from the approved baseline — i.e. unacknowledged drift.
+
+    ALL drift-relevant axes, not items alone. Found live 2026-08-15: browserstack's input
+    schemas changed (createLCASteps gained `requires_authentication`) — the scan reported the
+    drift, the surface pin caught it, and this function compared `items` only, so Decisions
+    said "0 waiting on you" while scan said "review the change, then approve". A schema-only
+    widening is the exact rug-pull class the pin was extended for (audit B2); a decision queue
+    that cannot see it is a queue the attacker routes around. An axis is compared only when
+    BOTH records carry it, so stores approved before that axis existed do not flood the queue
+    on upgrade — their drift stays invisible until the next approve, exactly as before."""
     out = []
     for key, entry in store.get("servers", {}).items():
         base, latest = approved(store, key), last(store, key)
-        if base and latest and base.get("items") != latest.get("items"):
+        if not (base and latest):
+            continue
+        if base.get("items") != latest.get("items") or any(
+                ax in base and ax in latest and base[ax] != latest[ax]
+                for ax in ("schemas", "props", "annotations")):
             out.append(key)
     return sorted(out)
 
@@ -531,20 +864,80 @@ def approved(store: dict[str, Any], key: str) -> dict[str, Any] | None:
     return hist[0] if hist else None
 
 
-def _migrate(store: dict[str, Any], key: str, legacy_keys: tuple[str, ...]) -> None:
+def _migrate(store: dict[str, Any], key: str, legacy_keys: tuple[str, ...],
+             alias: str | None = None) -> bool:
     """Move a pre-existing baseline onto `key` when the identity scheme changed underneath it.
 
     Without this, shipping the server-asserted identity would itself orphan every user's baseline on
     upgrade — the exact silent-reset this ADR exists to prevent, caused by the fix for it."""
     servers = store.get("servers") or {}
     if key in servers:
-        return
-    for old in legacy_keys:
-        if old in servers:
-            # Creates the new key, so it goes through the same gate as any other creation — a
-            # migration must not be the one path that can mint an entry nothing validated.
-            server_entry(store, key).update(servers.pop(old))
-            return
+        return False
+    for old in list(legacy_keys) + _shed_credential_keys(servers, key, alias):
+        if old not in servers:
+            continue
+        if not _may_adopt(servers[old], old, alias):
+            continue
+        # Creates the new key, so it goes through the same gate as any other creation — a
+        # migration must not be the one path that can mint an entry nothing validated.
+        server_entry(store, key).update(servers.pop(old))
+        return True
+    return False
+
+
+def credential_shed_keys(store: dict[str, Any], key: str, alias: str | None) -> tuple[str, ...]:
+    """`_shed_credential_keys` for callers that must know the answer BEFORE recording.
+
+    `record()` applies the migration itself, but the scan also has to decide whether to ANNOUNCE a
+    re-identification. A key the migration is about to adopt is not a different server, and saying
+    "its baseline does not carry over" about a baseline that does is a false alarm that would fire
+    once for every OAuth server on upgrade. One function, consulted by both."""
+    return tuple(_shed_credential_keys(store.get("servers") or {}, key, alias))
+
+
+def _shed_credential_keys(servers: dict[str, Any], key: str, alias: str | None) -> list[str]:
+    """Discriminated records this now-UNDISCRIMINATED entry could already be recorded under.
+
+    `legacy_identity_keys` covers the direction identity has moved before: bare -> discriminated,
+    when an entry gained a login. This is its mirror, and it opened on 2026-08-27 when the
+    discriminator stopped hashing a token this machine attached for itself (see
+    `credentials.IDENTITY_AS_DECLARED`). Every OAuth server keyed `mcp:<name>#<token-hash>` now
+    keys `mcp:<name>`, and without this every one of those baselines is orphaned on upgrade — the
+    silent reset ADR-0012 exists to prevent, caused once again by the fix for a different one.
+
+    Store-aware because it has to be: the snapshot no longer carries the fingerprint it is shedding,
+    so the old key is not derivable from it — only findable.
+
+    AMBIGUITY IS REFUSED, not resolved by sort order. Several discriminated records naming this
+    alias means one server was genuinely tracked under several accounts; adopting whichever comes
+    first would hand this entry an approval granted to a different account. Returning nothing gives
+    an honest first sighting instead, which asks a human rather than assuming one.
+    """
+    if not key.startswith("mcp:") or "#" in key or not alias:
+        return []
+    prefix = f"{key}#"
+    found = [k for k, rec in servers.items()
+             if k.startswith(prefix) and alias in ((rec or {}).get("aliases") or [])]
+    return found if len(found) == 1 else []
+
+
+def _may_adopt(record: dict[str, Any], old_key: str, alias: str | None) -> bool:
+    """May this entry take over `old_key`'s record — or does that record belong to someone else?
+
+    A `{transport}:{name}` key is scoped to ONE config name, so adopting it can only ever reclaim
+    this entry's own history (B3). `mcp:<asserted>` is not: once the login is part of the identity,
+    an entry WITHOUT credentials keeps that bare key as its live, current identity. A credentialled
+    sibling asserting the same name would otherwise walk off with it — destroying a real baseline
+    and inheriting an approval granted to a different account, which is both halves of the bug this
+    identity change exists to close, reintroduced by its own migration.
+
+    So a bare `mcp:` record is adoptable only when it names this entry as one of its aliases. A
+    genuinely conflated pre-upgrade record does (every `--track` scan records `alias=sn.name`); a
+    stranger's live record does not.
+    """
+    if not old_key.startswith("mcp:"):
+        return True
+    return bool(alias) and alias in (record.get("aliases") or [])
 
 
 def should_record(snap: ServerSnapshot) -> bool:
@@ -566,10 +959,20 @@ def key_for(snap: ServerSnapshot) -> str:
     Falls back to the old `transport:name` when a server declares nothing. Note the asserted name is
     server-controlled: changing it is itself a re-identification, which surfaces as a first sighting
     rather than as silence. That is a deliberate trade — see ADR-0012.
+
+    THE LOGIN IS PART OF THE IDENTITY when the entry carries one (ADR-0012 addendum, 2026-08-10).
+    The asserted name alone made the same server configured twice with different credentials — a
+    work GitHub and a personal one — collapse onto one baseline, so approving the tools on one made
+    the guard wave calls through on the other, a server the user never reviewed. Reproduced, then
+    fixed here. The discriminator is appended ONLY when the entry has an `env`/`headers` login, so
+    every credential-free server keys exactly as before and no existing baseline is disturbed.
     """
     asserted = (snap.server_info or {}).get("name")
     if isinstance(asserted, str) and asserted.strip():
-        return f"mcp:{asserted.strip()}"
+        key = f"mcp:{asserted.strip()}"
+        # A nameless server already keys by its CONFIG name (`transport:name`), which is distinct
+        # per entry — the conflation is only possible under a shared asserted name.
+        return f"{key}#{snap.credential_fingerprint}" if snap.credential_fingerprint else key
     return legacy_key_for(snap)
 
 
@@ -592,6 +995,25 @@ def transport_variant_keys(snap: ServerSnapshot) -> tuple[str, ...]:
     key adopt the old baseline instead. Harmless for a NAMED server: its `mcp:name` key already exists
     (transport-independent), so `_migrate` no-ops rather than adopting anything."""
     return tuple(f"{t}:{snap.name}" for t in _TRANSPORTS)
+
+
+def legacy_identity_keys(snap: ServerSnapshot) -> tuple[str, ...]:
+    """Every key this server could ALREADY be recorded under, for `record(..., migrate_from=...)`.
+
+    The transport variants (B3), plus — for an entry that now carries a credential discriminator —
+    the un-discriminated `mcp:<asserted>` it was keyed under before that change. Without this the
+    fix for credential conflation would orphan every existing approval on upgrade, which is the
+    silent baseline reset ADR-0012 exists to prevent, caused by the fix for a different one.
+
+    Where two entries shared a conflated record, the FIRST one re-scanned adopts it and the other
+    gets an honest first sighting. Which one wins is scan order; both keep working, and only the
+    loser re-approves.
+    """
+    keys = list(transport_variant_keys(snap))
+    asserted = (snap.server_info or {}).get("name")
+    if snap.credential_fingerprint and isinstance(asserted, str) and asserted.strip():
+        keys.append(f"mcp:{asserted.strip()}")
+    return tuple(keys)
 
 
 def last(store: dict[str, Any], key: str) -> dict[str, Any] | None:

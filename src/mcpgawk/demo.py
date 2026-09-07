@@ -174,6 +174,60 @@ class _Sandbox:
             env=self.env(), cwd=self.root, text=True, capture_output=True, timeout=60)
 
 
+def _real(out: str, *, keep: tuple[str, ...] = (), limit: int = 14) -> None:
+    """Print what mcpgawk ITSELF said, verbatim.
+
+    The acts below already run the shipped CLI and the real guard hook, and already abort if the
+    real thing does not do the real thing. But `capture_output` meant the evidence was checked and
+    then thrown away, so the screen showed only OUR summary of it — and a viewer cannot tell a tool
+    that detected something from a script that printed a sentence claiming it did. The proof existed
+    and was binned. It is shown now, indented and labelled as the tool's own words.
+    """
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if keep:
+        picked, hit = [], False
+        for ln in lines:
+            if any(k.lower() in ln.lower() for k in keep):
+                hit = True
+            if hit:
+                picked.append(ln)
+        lines = picked or lines
+    if not lines:
+        return
+    print(_c("2", "      ─ mcpgawk's own output ─"))
+    for ln in lines[:limit]:
+        print("      " + ln)
+    if len(lines) > limit:
+        print(_c("2", f"      … {len(lines) - limit} more line(s)"))
+
+
+def _sweep_stale_sandboxes(keep: Path) -> int:
+    """Delete PRIOR demo sandboxes, so `--clean` leaves nothing behind. Returns how many.
+
+    Found by driving the beta guide's exact steps against the shipped 0.1.26 (2026-08-13): the page
+    says the sandbox is "deleted with `mcpgawk demo --clean`", but --clean only removed the sandbox
+    of the run it started — the tester's ORIGINAL sandbox, the one they were trying to delete,
+    stayed on disk.
+
+    Deletion is gated on BOTH our mkdtemp prefix AND our own marker files (`mcp.json` and
+    `fixture_server.py`) being present, so a user's unrelated `mcpgawk-demo-notes` directory is
+    never touched. `keep` is the current run's root, which the caller deletes itself.
+    """
+    removed = 0
+    try:
+        tmp = Path(tempfile.gettempdir())
+        for entry in tmp.glob("mcpgawk-demo-*"):
+            if entry == keep or not entry.is_dir():
+                continue
+            if not ((entry / "mcp.json").is_file() and (entry / "fixture_server.py").is_file()):
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+    except OSError:
+        pass                      # a sweep that cannot run must not fail the demo
+    return removed
+
+
 def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
     # The demo is a scripted walkthrough; the CLI's own "a newer build is out" nag would print
     # after the closing line and undercut it. The sandbox subprocesses already suppress it; this
@@ -200,6 +254,7 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
             return _fail("the initial scan did not complete", r)
         _note(f"found and measured 1 local server: {_c('1', SERVER)} "
               f"(tool: {', '.join(box.approved_tools())}). Clean — nothing alarming yet.")
+        _real(r.stdout, keep=(SERVER,), limit=8)
 
         _act(2, "You approve it — this becomes the trusted baseline")
         r = box.cli("approve", SERVER)
@@ -220,35 +275,46 @@ def run_demo(sandbox: str | None = None, clean: bool = False) -> int:
             return _fail("the drifted scan did not report drift", r)
         _note(_c("31", "DRIFT raised: read_notes changed after approval, and its new description "
                        "trips an injection signature. Baseline stays put until a human approves."))
+        _real(r.stdout, keep=("DRIFT",), limit=16)
         if box.approved_tools() != ["read_notes"]:
             return _fail("the baseline moved without an approve", r)
 
-        _act(5, "An agent tries the new tool — the guard blocks it")
-        approved = box.guard("read_notes")
+        _act(5, "An agent tries both tools — the guard blocks both")
+        pulled = box.guard("read_notes")
         blocked = box.guard("exfiltrate_notes")
-        if approved.stdout.strip():
-            return _fail("the guard objected to an APPROVED tool", approved)
-        _note(f"call to approved {_c('1', 'read_notes')}: "
-              f"{_c('32', 'no objection')} (the guard stays silent on what you trusted).")
+        if '"permissionDecision": "deny"' not in pulled.stdout:
+            return _fail("the guard did NOT block the tool that CHANGED after approval", pulled)
+        pulled_reason = json.loads(pulled.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+        _note(f"call to approved-but-rewritten {_c('1', 'read_notes')}: {_c('31', 'BLOCKED')} — "
+              f"its content changed since you approved it. The evidence is the last scan, not "
+              f"this call; the denial says so.")
+        _real(pulled_reason, limit=6)
         if '"permissionDecision": "deny"' not in blocked.stdout:
             return _fail("the guard did NOT block the tool that appeared after approval", blocked)
         reason = json.loads(blocked.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
         _note(f"call to new {_c('1', 'exfiltrate_notes')}: {_c('31', 'BLOCKED')}.")
-        _note(_c("2", "  " + reason.splitlines()[0]))
+        _real(reason, limit=8)
 
         print(_c("1", "\n✓ That is the whole product in one run:") +
-              " discover, measure, approve, detect drift, block the tool that arrived after you\n"
-              "  approved it — all locally, nothing uploaded.")
-        _note(_c("2", "The description drift is a review signal for you; the added tool is what the "
-                      "guard blocks at call time. Two different jobs, both shown above."))
+              " discover, measure, approve, detect drift, block both the tool that changed and\n"
+              "  the tool that arrived after you approved it — all locally, nothing uploaded.")
+        _note(_c("2", "The added tool is denied by name. The rewritten tool is denied on the LAST "
+                      "SCAN's evidence, not this call's: a change nobody has scanned yet passes "
+                      "until the next scan or monitor tick — and every such denial says so."))
         return 0
     finally:
         if clean:
             shutil.rmtree(root, ignore_errors=True)
-            _note(_c("2", "\nsandbox deleted (--clean)."))
+            stale = _sweep_stale_sandboxes(keep=root)
+            extra = f" {stale} earlier sandbox(es) removed too." if stale else ""
+            _note(_c("2", f"\nsandbox deleted (--clean).{extra}"))
         else:
             print(_c("2", f"\nSandbox kept at {root}"))
-            _note(_c("2", f"inspect it, or remove it with:  rm -r {root}"))
+            # Name the FLAG first, not a raw `rm -r`. The beta guide tells testers `--clean` is how
+            # this goes away, and handing a stranger an `rm -r` with an interpolated path as the
+            # headline instruction is both inconsistent with that and a worse habit to teach.
+            _note(_c("2", "inspect it, or run `mcpgawk demo --clean` to do this again and clean up"))
+            _note(_c("2", f"after itself. To remove just this one:  rm -r {root}"))
 
 
 def _fail(what: str, proc: subprocess.CompletedProcess) -> int:

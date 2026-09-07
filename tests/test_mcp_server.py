@@ -3,6 +3,7 @@
 This module is unusual: it is a SECURITY tool that is itself an MCP server, driven by other agents.
 So the tests here are mostly about restraint — what it must refuse to do when an agent asks.
 """
+import asyncio
 import json
 
 import pytest
@@ -125,7 +126,7 @@ async def test_fleet_scan_does_not_launch_local_servers_by_default(server, monke
         "local": {"command": "npx", "args": ["-y", "x"]},
         "remote": {"url": "https://example.com/mcp"},
     })
-    monkeypatch.setattr(mcp_server, "detect_unscannable", lambda: [])
+    monkeypatch.setattr(mcp_server, "detect_unscannable", lambda **kw: [])
     monkeypatch.setattr(mcp_server, "probe", fake_probe)
 
     payload = await _call(server, "scan_mcp_fleet", {})
@@ -143,7 +144,7 @@ async def test_fleet_scan_launches_locals_only_when_explicitly_asked(server, mon
         return ServerSnapshot(name=name, transport="stdio", protocol_version="1")
 
     monkeypatch.setattr(mcp_server, "discover_servers", lambda: {"local": {"command": "npx"}})
-    monkeypatch.setattr(mcp_server, "detect_unscannable", lambda: [])
+    monkeypatch.setattr(mcp_server, "detect_unscannable", lambda **kw: [])
     monkeypatch.setattr(mcp_server, "probe", fake_probe)
 
     await _call(server, "scan_mcp_fleet", {"launch_local": True})
@@ -202,3 +203,23 @@ def test_server_reports_its_own_version_not_the_sdks():
     server = build_server()
     assert server.version == __version__
     assert server.version != "1.28.1"  # the mcp SDK version this used to report
+
+
+def test_the_advertised_tools_still_go_out_in_WIRE_spelling(server):
+    """The tool models are built with the SDK's snake_case FIELD names (that is what a type checker
+    can see), and the SDK serialises by alias — so the JSON an agent receives must still say
+    `inputSchema` and `readOnlyHint`. Pinned on the SERIALISED output, not on the constructor call:
+    the constructor accepted either spelling, which is how the field names drifted in the first
+    place, and only the rendered form is what any client actually reads.
+
+    SCOPE, so this is not read as more than it is: it pins that the models still carry their wire
+    aliases. It cannot catch a caller elsewhere serialising them WITHOUT `by_alias`, which would be
+    the other way to send an agent snake_case JSON. That needs the transport-level E2E.
+    """
+    tools = asyncio.run(_list_tools(server))
+    assert tools, "the server advertises no tools at all"
+    for tool in tools:
+        wire = tool.model_dump(by_alias=True, exclude_none=True)
+        assert "inputSchema" in wire, f"{wire.get('name')} lost its wire-spelled schema: {sorted(wire)}"
+        for key in wire.get("annotations") or {}:
+            assert "_" not in key, f"{wire.get('name')} annotation {key!r} is not the wire spelling"

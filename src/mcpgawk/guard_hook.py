@@ -109,16 +109,64 @@ def behaviour_path() -> Path:
     return Path(override) if override else DEFAULT_BEHAVIOUR
 
 
-def _load_behaviour() -> dict | None:
-    """`{server: {tool: {"source"?, "sink"?}}}` or None when no profile exists or it is
-    unreadable. None means the behavioural TIER is absent — never that anything is safe; the
-    verdict then rests on the declared basis alone, and B5 makes the absence loud elsewhere."""
+def _load_profile() -> dict | None:
+    """The raw behaviour profile, or None when absent or unreadable. Read once per call."""
     try:
         raw = json.loads(behaviour_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _load_behaviour(raw: dict | None = None) -> dict | None:
+    """`{server: {tool: {"source"?, "sink"?}}}` or None when no profile exists or it is
+    unreadable. None means the behavioural TIER is absent — never that anything is safe; the
+    verdict then rests on the declared basis alone, and B5 makes the absence loud elsewhere."""
+    raw = raw if raw is not None else _load_profile()
     servers = raw.get("servers") if isinstance(raw, dict) else None
     return servers if isinstance(servers, dict) else None
+
+
+def _sandbox_fact(raw: dict | None, server: str) -> str:
+    """What the sandbox could say about this server, in words — never a claim it did not earn."""
+    verified = raw.get("verified") if isinstance(raw, dict) else None
+    rec = verified.get(server) if isinstance(verified, dict) else None
+    backend = rec.get("backend") if isinstance(rec, dict) else None
+    return f"verified in a {backend} sandbox" if isinstance(backend, str) and backend else "not verified"
+
+
+def _already_told(session: str | None, server: str, tool: str) -> bool:
+    """[FOUNDER 2026-09-05] the confidence line fires on the FIRST call per session per
+    server+tool. No session identity → nothing to dedupe against → tell every time (honest)."""
+    if not session:
+        return False
+    spool = _load_sibling("spool")
+    if spool is None or not hasattr(spool, "read_session"):
+        return False
+    try:
+        rows = spool.read_session(session, path=spool.spool_path(store_path=str(history_path())))
+    except Exception:                              # noqa: BLE001 — a lost memory tells again
+        return False
+    return any(isinstance(r, dict) and r.get("server") == server and r.get("tool") == tool
+               and r.get("decision") != "deny" for r in rows)
+
+
+def _confidence_line(server: str, tool: str, record: dict | None, approved: dict | None,
+                     seen_at: str | None, note: str | None, checked: bool,
+                     profile: dict | None) -> str:
+    """One line of CONTEXT for the running agent on a call that was not denied. It states its
+    evidence and its dates; where a date was never recorded it says so rather than borrowing one.
+    Never a verdict, never a remedy the agent could run: the person at the keyboard scans."""
+    if note:
+        return f"mcpgawk: {server} · {tool} — NOT checked: {note}"
+    if approved is None or not checked:
+        return (f"mcpgawk: {server} · {tool} — not approved on this machine, so not checked. "
+                f"The person at the keyboard records a baseline with `mcpgawk scan`.")
+    approved_at = record.get("approved_at") if isinstance(record, dict) else None
+    when = f"approved {approved_at}" if isinstance(approved_at, str) else "approval date not recorded"
+    seen = f"last seen {seen_at}" if seen_at else "not re-scanned since"
+    return (f"mcpgawk: {server} · {tool} — at your baseline ({when}, {seen}); "
+            f"{_sandbox_fact(profile, server)}.")
 
 
 def _session_sources(session: str | None, behaviour: dict) -> tuple[tuple[str, str], ...]:
@@ -213,6 +261,17 @@ def approved_for_detail(server: str, store_path: Path) -> tuple[dict[str, str] |
 
 def _approved_from_projection(server: str,
                               store_path: Path) -> tuple[dict[str, str] | None, str | None]:
+    """`(approved {tool: hash}, note)` — thin wrapper over `_record_from_projection`, kept so
+    `approved_for` / `approved_for_detail` (the paid gateway's contract) are unchanged."""
+    record, note = _record_from_projection(server, store_path)
+    if record is None:
+        return None, note
+    tools = record.get("tools")
+    return (dict(tools) if isinstance(tools, dict) else None), note
+
+
+def _record_from_projection(server: str,
+                            store_path: Path) -> tuple[dict | None, str | None]:
     """Read the approved surface from the PROJECTION the canonical writer generated — never from
     `history.json` itself. This hook used to hold its own second reader of the store, kept honest
     only by a test; now it consumes an artefact `history.save` produced, so the two cannot drift.
@@ -259,27 +318,59 @@ def _approved_from_projection(server: str,
         return None, None
     record = servers.get(server)
     if record is None:
-        # The projection may be keyed by the server's ASSERTED IDENTITY rather than the config
-        # name the agent uses in `mcp__<name>__<tool>`; `aliases` carries the mapping.
-        for candidate in servers.values():
-            if isinstance(candidate, dict) and server in (candidate.get("aliases") or []):
-                record = candidate
-                break
+        # The identity key is literally `mcp:<serverInfo.name>`, and an agent never says the prefix:
+        # it calls `mcp__<config name>__<tool>`. When the baseline came from a CLI scan
+        # (--stdio/--http) there IS no config name to alias — the only alias is "cli-stdio" — so a
+        # client whose config name matches the server's own name matched nothing and the guard
+        # DEFERRED on a server that had an approved baseline. Fail-open, on the documented
+        # single-server route the beta guide gives testers. Fixed in the READER so projections
+        # already on disk are covered without being regenerated.
+        # SAME ORDER AS `history.resolve` (exact key, then `mcp:<name>`, then aliases), and that
+        # agreement is the point. Alias-first was tried and reverted: it made the ENFORCING reader
+        # resolve a name differently from the one `mcpgawk approve <name>` uses, so an operator
+        # could approve record B while the guard enforced record A, with nothing saying so.
+        # Ordering does not decide safety here — a declared-tier DENY is only reachable when a
+        # baseline was found at all, so widening the lookup can add denials but never permissions.
+        # The alias scan below DEFERS on an ambiguous name rather than picking the first match —
+        # it was a known gap, and it is closed a few lines down. Placeholder labels
+        # (`cli-stdio` and friends) no longer reach an alias list at all: `history` refuses them at
+        # the write and sheds them at both doors, so they cannot single-match a survivor either.
+        record = servers.get(f"mcp:{server}")
+    if record is None:
+        matches = [c for c in servers.values()
+                   if isinstance(c, dict) and server in (c.get("aliases") or [])]
+        if len(matches) > 1:
+            # AMBIGUOUS: this name is an alias of several approved servers, and picking the first
+            # meant the ENFORCING reader silently judged a call against whichever record happened to
+            # sort first. The routine source of collisions (the reused ad-hoc placeholder) is shed
+            # now, so reaching here means two config entries really do share a name. Defer LOUDLY:
+            # never enforce a baseline we cannot show belongs to the server being called.
+            return None, (
+                f"{server!r} is an alias of {len(matches)} different approved servers — deferring "
+                f"(not enforcing) rather than guessing which baseline applies. Re-scan so each is "
+                f"keyed distinctly, or approve the one you mean by its own name.")
+        record = matches[0] if matches else None
     if not isinstance(record, dict):
         return None, None
-    tools = record.get("tools")
-    return (dict(tools) if isinstance(tools, dict) else None), None
+    if reason := record.get("unreadable"):
+        # The writer marked this baseline uninterpretable. Deferring is the only honest option — we
+        # cannot enforce hashes computed by rules we do not know — but it must be SAID, because a
+        # silent defer is indistinguishable from "this server was never approved", and the user
+        # believes an approved server is being guarded.
+        return None, (f"not enforcing {server!r}: {reason}. Re-approve it on this version, or "
+                      f"upgrade mcpgawk, to be guarded again.")
+    return record, None
 
 
 def decide(event: dict, store_path: Path | None = None,
            fmt: str = "claude") -> tuple[dict | None, str | None]:
     """(hook output or None to defer, stderr note or None)."""
-    output, note, _basis, _checked = _decide(event, store_path, fmt)
+    output, note, _basis, _checked, _reason, _context = _decide(event, store_path, fmt)
     return output, note
 
 
 def _decide(event: dict, store_path: Path | None,
-            fmt: str) -> tuple[dict | None, str | None, str, bool]:
+            fmt: str) -> tuple[dict | None, str | None, str, bool, str | None, str | None]:
     """The full decision including WHICH BASIS produced it, so the record carries the evidence
     tier (declared vs observed) — an operator cannot calibrate trust in a deny without it.
 
@@ -290,28 +381,49 @@ def _decide(event: dict, store_path: Path | None,
     """
     tool_name, _args = _read_event(fmt, event)
     if not isinstance(tool_name, str):
-        return None, None, "declared", False
+        return None, None, "declared", False, None, None
 
     parsed = parse_mcp_tool_name(tool_name)
     if parsed is None:
-        return None, None, "declared", False   # not an MCP tool: not ours to judge
+        return None, None, "declared", False, None, None   # not an MCP tool: not ours to judge
     server, tool = parsed
 
     store = store_path or history_path()
-    approved, note = _approved_from_projection(server, store)
+    record, note = _record_from_projection(server, store)
+    approved = None
+    approved_props = None
+    seen_hash = None
+    seen_at = None
+    if record is not None:
+        _tools = record.get("tools")
+        approved = dict(_tools) if isinstance(_tools, dict) else None
+        # The last sighting's hash for THIS tool (history.py projects it as `seen`): the only
+        # live-ish content evidence a 15 ms stdlib hook can hold. None on older projections.
+        _seen = record.get("seen")
+        if isinstance(_seen, dict):
+            _h = _seen.get(tool)
+            seen_hash = _h if isinstance(_h, str) and _h else None
+            _at = record.get("seen_at")
+            seen_at = _at if isinstance(_at, str) else None
+        _props = record.get("props")
+        if isinstance(_props, dict):
+            _p = _props.get(tool)
+            if isinstance(_p, list):
+                approved_props = [str(x) for x in _p]
 
     # The verdict itself comes from the shared decision core — the paid gateway evaluates the SAME
     # functions, so the paths cannot drift apart. If the core cannot be loaded we cannot compute a
     # verdict, and "we found nothing" is defer, not deny.
     core = _load_sibling("decision")
     if core is None:
-        return None, note, "declared", False
+        return None, note, "declared", False, None, None
 
     # The behavioural tier (free since Task 0): observations verify recorded for THIS server,
     # plus this session's earlier observed-source calls from the spool. Both are gathered only
     # when they can matter — an observed sink is what makes the sequence check worth reading the
     # session memory for.
-    behaviour = _load_behaviour()
+    profile = _load_profile()
+    behaviour = _load_behaviour(profile)
     observations = behaviour.get(server) if behaviour else None
     if not isinstance(observations, dict):
         observations = None
@@ -319,14 +431,43 @@ def _decide(event: dict, store_path: Path | None,
     if behaviour and observations and (observations.get(tool) or {}).get("sink") is True:
         sources = _session_sources(_session_id(event), behaviour)
 
-    verdict, basis, reason = core.verdict(server, tool, approved, observations, sources)
+    try:
+        verdict, basis, reason = core.verdict(server, tool, approved, observations, sources,
+                                              live_hash=seen_hash,
+                                              args=_args if isinstance(_args, dict) else None,
+                                              approved_props=approved_props,
+                                              seen_at=seen_at)
+    except TypeError:
+        # An older decision core beside a newer hook (mixed install): the newer keyword is
+        # silently absent rather than the hook crashing — a crashed hook allows everything.
+        try:
+            verdict, basis, reason = core.verdict(server, tool, approved, observations, sources,
+                                                  live_hash=seen_hash,
+                                                  args=_args if isinstance(_args, dict) else None,
+                                                  approved_props=approved_props)
+        except TypeError:
+            verdict, basis, reason = core.verdict(server, tool, approved, observations, sources)
     # Checked means there was something to check AGAINST: an approved surface for this server, or
     # recorded observations of it. With neither, `verdict` had no evidence and whatever it returned
     # is a decline, not a pass. A DENY is checked by construction.
     checked = verdict == core.DENY or approved is not None or observations is not None
     if verdict == core.DENY:
-        return _deny(fmt, reason), note, basis, checked
-    return None, note, basis, checked
+        # One line for the PERSON, beside the prose for the agent. Older cores lack the helper;
+        # the deny stands without the line rather than the hook failing.
+        human = None
+        line_fn = getattr(core, "human_line", None)
+        code_fn = getattr(core, "reason_code", None)
+        if callable(line_fn) and callable(code_fn):
+            human = line_fn(server, tool, code_fn(reason))
+        return _deny(fmt, reason, human), note, basis, checked, reason, None
+    # Slice 5 (2026-09-05): context for the running agent — on a checked pass, once per session
+    # per server+tool; on every defer. Composed here, EMITTED by main() for Claude Code only, and
+    # never through `output` (any output is recorded as a deny).
+    session = _session_id(event)
+    context: str | None = None
+    if note or approved is None or not checked or not _already_told(session, server, tool):
+        context = _confidence_line(server, tool, record, approved, seen_at, note, checked, profile)
+    return None, note, basis, checked, None, context
 
 
 def _read_event(fmt: str, event: dict) -> tuple[str | None, dict]:
@@ -339,7 +480,7 @@ def _read_event(fmt: str, event: dict) -> tuple[str | None, dict]:
     return mod.parse_event(fmt, event)
 
 
-def _deny(fmt: str, reason: str) -> dict:
+def _deny(fmt: str, reason: str, human: str | None = None) -> dict:
     """This agent's own deny shape. Claude Code and Codex take `permissionDecision`; Cursor takes
     `{"permission": "deny"}` with snake_case messages. Emitting the wrong one reads as a
     MALFORMED hook, and on Cursor a malformed hook ALLOWS the call unless failClosed is set — so
@@ -347,10 +488,18 @@ def _deny(fmt: str, reason: str) -> dict:
     text = f"[mcpgawk guard] {reason}"
     mod = _load_sibling("agents")
     if mod is None:
-        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                       "permissionDecision": "deny",
-                                       "permissionDecisionReason": text}}
-    return mod.deny_payload(fmt, text)
+        payload = {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                          "permissionDecision": "deny",
+                                          "permissionDecisionReason": text}}
+    else:
+        payload = mod.deny_payload(fmt, text)
+    # Claude Code surfaces a top-level `systemMessage` to the USER (hooks docs); until today a
+    # clean deny reached the person only if the client chose to render the agent's reason.
+    # Claude Code only: the other clients' documented shapes have no such field, and an unknown
+    # top-level key is a malformed hook on Cursor — which ALLOWS by default.
+    if fmt == "claude" and human:
+        payload["systemMessage"] = human
+    return payload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -384,24 +533,32 @@ def main(argv: list[str] | None = None) -> int:
             fmt = argv[i + 1]
 
     try:
-        output, note, basis, checked = _decide(event, None, fmt)
+        output, note, basis, checked, reason, context = _decide(event, None, fmt)
     except Exception as exc:  # noqa: BLE001 — our bug must never brick the agent session
         print(f"[mcpgawk guard] internal error, deferring (NOT a clean verdict): "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_OK
 
-    _record(event, output, fmt, basis, checked)
+    _record(event, output, fmt, basis, checked, reason=reason)
 
     if note:
         print(f"[mcpgawk guard] {note}", file=sys.stderr)
     if output is not None:
         sys.stdout.write(json.dumps(output))
         return EXIT_DENY if fmt in DENY_BY_EXIT else EXIT_OK
+    # Claude Code accepts `additionalContext` with NO permissionDecision: the call goes through
+    # the user's normal permission flow untouched (hooks docs). Not "allow" — never. Claude Code
+    # only: the same field is unverified on Codex and absent from Cursor/Gemini/Windsurf, and an
+    # unexpected stdout on an exit-coded client is a malformed hook.
+    if context and fmt == "claude":
+        sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                                            "additionalContext": context}}))
     return EXIT_OK
 
 
 def _record(event: dict, output: dict | None, fmt: str = "claude",
-            basis: str = "declared", checked: bool = False) -> None:
+            basis: str = "declared", checked: bool = False,
+            reason: str | None = None) -> None:
     """Append this decision to the runtime spool.
 
     EVERY checked call is recorded, including the ones we defer on — that is the whole point.
@@ -437,9 +594,22 @@ def _record(event: dict, output: dict | None, fmt: str = "claude",
         # them made a machine with no usable projection indistinguishable in the log
         # from a fully enforced one.
         decision = "deny" if output else ("allow" if checked else "defer")
+        # This module is the ONE pinned exception allowed to know the store's path
+        # (test_layer_invariants); spool.py, loaded here by file with no package, must be told.
+        code = None
+        if reason:
+            core = _load_sibling("decision")
+            code_fn = getattr(core, "reason_code", None) if core is not None else None
+            code = code_fn(reason) if callable(code_fn) else None
+        agent_id = event.get("agent_id")
+        agent_type = event.get("agent_type")
         spool.record_decision(
             server=server, tool=tool, decision=decision, adapter=adapter, basis=basis,
             session=_session_id(event),
+            path=spool.spool_path(store_path=str(history_path())),
+            reason=reason, reason_code=code,
+            agent_id=agent_id if isinstance(agent_id, str) and agent_id else None,
+            agent_type=agent_type if isinstance(agent_type, str) and agent_type else None,
         )
     except Exception:                              # noqa: BLE001 - a lost record is not a verdict
         return

@@ -5,6 +5,101 @@ All notable changes to mcpgawk. Format: [Keep a Changelog](https://keepachangelo
 > Entries for 0.1.14 – 0.1.20 were written on 2026-08-01, after the fact, from each release's own
 > commit message — the note recorded at the moment that version was published — not from memory.
 
+## [0.1.29] — 2026-08-16
+
+The panel release. Everything below has been in the engine since 0.1.28 and is shipping now;
+the version itself moved because the VS Code extension's rebranded listing needed a new number
+and engine and extension ship as one version.
+
+### Added
+
+- **Sign in to servers that refuse dynamic registration.** Bring your own OAuth client — register
+  one with the provider, point mcpgawk at it, and the flow uses a pinned redirect instead of
+  asking the server to mint a client it will not mint. Servers that only sign in through their
+  own login tool are handled too: that call now runs **inside the engine's own session**, so the
+  token lands where the rest of the session can use it, and any such server can be routed through
+  a running gateway.
+- **The gateway affordance in the panel.** It generates the whole configuration and hands you one
+  command to run. It never starts the process for you. Credentials are written as `${VAR}`
+  references and everything else literally, a credential embedded in a URL never reaches the
+  generated config, and a Desktop-extension placeholder is either resolved or the backend is
+  folded rather than guessed at.
+- **A live session log.** Runs, sweeps, alerts and evidence stream to the page as they happen,
+  seamlessly with JavaScript and honestly without it.
+- **Guided sign-in.** The panel runs the server's own setup steps and hands you the link, written
+  as steps for a person rather than as a prompt for a model.
+- **Rows open in place.** Sessions and principals drill down without leaving the tab, and the tab
+  you acted from is the tab you land on.
+
+### Changed
+
+- **The panel wears the product's own palette** — warm sage field, one accent, the mark in black —
+  with one type scale in place of eleven ad-hoc font sizes, AA contrast throughout, named
+  controls, keyboard-reachable scrolling, and scrollable tables that actually look scrollable.
+- **First run ends at the panel** rather than at a wall of text.
+
+### Fixed
+
+- **A smuggled field is a rug pull, and it is now denied at the fill.** A tool that quietly grows
+  a field its approved surface never had is blocked where the argument is populated — the only
+  place the substitution is observable.
+- **An unauthenticated run is INCOMPLETE, never clean.** A verify run that could not sign in was
+  reporting a clean verdict for checks it never performed. A run that could not finish is not a
+  pass, and the panel no longer paints one in the clean colour.
+- **Zero verified never headlines as clean**, and a schema-only drift no longer renders as
+  Blocked — the chip now says what enforcement actually did.
+- **The panel had been overstating protection** and doing its work invisibly. Every surface now
+  says what is true, numbers and times read correctly on a cold load, and a dead run says it was
+  interrupted instead of appearing to still be going.
+- **A stale install announces its age** instead of quietly reporting on a version you replaced.
+- A dead OAuth flow is one honest line rather than a traceback followed by circular advice, a
+  scaffolding tool is never mistaken for a sign-in surface, and a refusal to register dynamically
+  names the bring-your-own-client route through it.
+- The SDK's child-cleanup traceback no longer surfaces in the CLI banner.
+
+## [0.1.28] — 2026-08-13
+
+### Added
+
+- **Full MCP 2026-07-28 ("MCP 2") support, alongside every legacy revision.** Scan reaches
+  servers that refuse the legacy handshake (`server/discover` fallback), and the verify engine
+  grew its own modern client — behavioural verification now completes against modern-only
+  servers (the official TypeScript SDK has no v2 yet). Legacy servers are unchanged: the old
+  handshake is still tried first, so identities and baselines are stable.
+- Agent-installable skill (`skills/mcpgawk`): teaches any coding agent to measure a server
+  before trusting it and to audit an MCP-2 upgrade as a baseline diff.
+
+### Fixed
+
+- The panel acknowledges a button clicked while another action runs, instead of silently
+  ignoring it.
+
+## [0.1.27] — 2026-08-13
+
+### Security
+
+- The store (`history.json`) no longer persists credentials carried in tool names, resource URIs,
+  or annotation values — masked at the write, with drift identity preserved.
+- The runtime decision log (`calls.jsonl`) no longer records credential-shaped server/tool names
+  from hook events, and keeps writing even without a package context.
+- `runs.db` no longer records the credential from a `scan --http <url>` command line; the target
+  column stays readable (`apiKey=***`).
+- The verify audit log no longer stores an excerpt of tool output containing the very credential a
+  finding convicted the server for; the observation stays in the trail as `[REDACTED]`.
+- `last-verify.json`, the behaviour profile, and verify's own stdout no longer carry a
+  credential-shaped tool name; the skipped-tools list stays readable.
+- The panel's action banner masks bare pasted keys, not only URL credentials.
+- OAuth token files are created owner-only in one syscall (no write-then-chmod window, and a
+  refused chmod can no longer leave a token world-readable); the token directory is 0700, and a
+  store written by an older version is repaired on the next login.
+- The verify run archive (directories, audit logs, archived reports) is created owner-only;
+  existing archives are narrowed on the next run.
+
+### Fixed
+
+- `mcpgawk demo --clean` now removes earlier runs' sandboxes too — previously it re-ran the demo
+  and deleted only its own new sandbox, leaving the one you asked it to delete.
+
 ## [0.1.22] — 2026-08-01
 
 ### Fixed

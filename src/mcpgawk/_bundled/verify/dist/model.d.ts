@@ -17,6 +17,15 @@ export interface ServerConfig {
     readonly url?: string;
     readonly transport?: Transport;
     readonly headers?: Readonly<Record<string, string>>;
+    /**
+     * THROUGH-GATEWAY probing ([FOUNDER] 2026-08-15, generalised for every sign-in server): when
+     * a running gateway already fronts this server, verify talks to the GATEWAY endpoint (`url`)
+     * instead of spawning its own copy — no second mcp-remote, no callback-port collision, and the
+     * in-band sign-in authenticates the gateway's own persistent session, which then stays usable.
+     * The gateway namespaces every backend's tools as `<prefix>__<tool>`; set here, enumeration
+     * filters to this backend and strips the prefix, and every probe call re-adds it.
+     */
+    readonly backendPrefix?: string;
 }
 export declare function isRemote(server: ServerConfig): boolean;
 /** A tool that was NOT invoked, and why (safe mode skips anything not confidently read-only). */
@@ -74,6 +83,16 @@ export interface ServerReport {
     readonly sandboxBackend: "proxied-container" | "docker" | "proxy" | "none";
     /** Set only when `isolate` was requested but Docker was unavailable/unusable for this command. */
     readonly sandboxDegradedReason?: string;
+    /** Set when this server's restricting annotations were IGNORED as uninformative — every tool
+     * carried the same restricting label (kite stamps all 22 destructive, get_ltp included).
+     * Labels that never vary carry no information, and honouring them lets a server evade
+     * behavioural verification by labelling; name-mutating tools stayed skipped regardless. */
+    readonly labelNoiseNote?: string;
+    /** Set when the server needed an in-band sign-in that NEVER completed — every read answered
+     * as unauthenticated, so the checks "completed" against auth-failure responses and proved
+     * nothing behavioural. Forces the server INCOMPLETE (found live 2026-08-15: the persisted
+     * report called such a run `clean, complete` while the panel said "proved nothing"). */
+    readonly authIncomplete?: string;
     /** Meta-tool name(s) that make this a dynamic-DISPATCH server (see dispatch.ts). Non-empty means
      * a larger real tool catalog is hidden behind them and was NOT enumerated by the static tools/list
      * — the verification is INCOMPLETE, and a "clean" result on the visible tools is not proof of a
@@ -119,5 +138,13 @@ export interface VerifyOptions {
      * if Docker is unavailable or the command can't be containerized.
      */
     readonly isolate?: boolean;
+    /**
+     * Wall-clock budget for ONE server, in ms. Once it is spent, no further check on that server is
+     * started: each remaining check is recorded as an error ("not attempted — server budget of N s
+     * exhausted"), one `server-timeout` audit event fires, and the server's status can only be
+     * `incomplete` (planned > completed) — never `clean`. Checks already in flight finish on their
+     * own probe timeout. Nothing is raced or cancelled: a race cannot reclaim a container.
+     */
+    readonly serverTimeoutMs?: number;
 }
 //# sourceMappingURL=model.d.ts.map

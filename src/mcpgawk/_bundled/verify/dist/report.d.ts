@@ -70,6 +70,10 @@ export interface ReportServer {
     readonly sandboxBackend: "proxied-container" | "docker" | "proxy" | "none";
     /** Set only when sandboxBackend is "proxy" because Docker was attempted and unavailable/unusable. */
     readonly sandboxDegradedReason?: string;
+    /** Set when this server's restricting annotations were ignored as uninformative (blanket
+     * labels, kite-style: every tool stamped destructive). Rendered by human surfaces so a
+     * label-evading server can never look cautiously verified. */
+    readonly labelNoiseNote?: string;
     /** Meta-tool name(s) that make this a dynamic-dispatch server — a larger real catalog is hidden
      * behind them and was NOT enumerated. Non-empty forces status `incomplete` (never `clean`). */
     readonly dynamicDispatch?: readonly string[];
@@ -167,6 +171,7 @@ export declare function serverCompleteness(r: DispatchCoverage & {
     readonly checkErrors: readonly CheckError[];
     readonly checksPlanned?: number;
     readonly checksCompleted?: number;
+    readonly authIncomplete?: string;
 }): Completeness;
 /** Completeness for the WHOLE run: every server complete, at least one server, at least one tool
  * anywhere, and no server that failed outright. */

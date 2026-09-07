@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync, } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync, } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import { readSharedBaseline } from "./fleet.js";
 import { renderHtml } from "./html.js";
 import { toJUnit } from "./junit.js";
 import { LEGACY_PINS_SCHEMA_VERSIONS, PINS_SCHEMA_VERSION, diffPins, hasDrift, } from "./pins.js";
+import { redactAuditEvent, redactDocument, redactText } from "./redact.js";
 import { buildReport, exitCodeForStatus, groupEgressByHost, toCsv, } from "./report.js";
 import { toSarif } from "./sarif.js";
 import { serve } from "./serve.js";
@@ -17,7 +18,7 @@ import { verifyServer } from "./verify.js";
 const USAGE = `usage: mcpgawk verify <config.json> [--unsafe] [--isolate] [--json] [--html <file>] [--csv <file>]
                           [--sarif <file>] [--junit <file>] [--behaviour-profile <file>] [--suppress <file>]
                           [--baseline <file>] [--webhook <url>] [--audit-log <file>] [--out <file>]
-                          [--audit-source] [--source-dir <path>]
+                          [--audit-source] [--source-dir <path>] [--server-timeout <seconds>]
        mcpgawk verify serve [--port <n>] [--host <addr>]   # local web UI
        mcpgawk verify suppress <findingId> --file <file> --reason "<why>" [--approved-by "<who>"]
 
@@ -41,6 +42,11 @@ mcpgawk verify resolves it; a config that references an unset variable fails lou
                    contained too, observed against an explicit registry allowlist. Requires Docker;
                    degrades to the default proxy sandbox with a warning otherwise. Slower per probe
                    (a container network per call) — the default remains the everyday path.
+--server-timeout <seconds>: wall-clock budget PER SERVER. Once spent, no further check on that
+                   server is started: the rest are recorded as not attempted, the server is reported
+                   INCOMPLETE (never clean), the run moves on. Nothing is cancelled mid-flight — a
+                   check in progress finishes on its own probe timeout. A server whose process never
+                   starts is abandoned after two such tools regardless (see errors[]).
 --baseline <file>: first run records a fingerprint of each server's tools; later runs flag DRIFT
                    (added / removed / changed tools) — i.e. a rug-pull.
 --behaviour-profile <file>: write a gawk.behaviour/1 profile (per-tool observed source/sink) — feed
@@ -151,6 +157,13 @@ licenseOpts = {}) {
     const webhookUrl = flagValue("--webhook");
     const auditLogPath = flagValue("--audit-log");
     const outPath = flagValue("--out");
+    const serverTimeoutRaw = flagValue("--server-timeout");
+    const serverTimeoutMs = serverTimeoutRaw === undefined ? undefined : Number(serverTimeoutRaw) * 1000;
+    if (serverTimeoutMs !== undefined && !(Number.isFinite(serverTimeoutMs) && serverTimeoutMs > 0)) {
+        err(`--server-timeout wants a positive number of seconds, got '${serverTimeoutRaw}'`);
+        err(USAGE);
+        return 2;
+    }
     const valueFlags = new Set([
         "--html",
         "--csv",
@@ -161,6 +174,7 @@ licenseOpts = {}) {
         "--webhook",
         "--audit-log",
         "--out",
+        "--server-timeout",
     ]);
     const configPath = argv.find((a, i) => !a.startsWith("--") && !valueFlags.has(argv[i - 1] ?? ""));
     if (!configPath) {
@@ -191,7 +205,16 @@ licenseOpts = {}) {
     if (auditLogPath) {
         // Truncate/create fresh at the start of this run -- an audit log from a stale prior run
         // silently mixed into a new one would be worse than no audit log at all.
-        writeFileSync(auditLogPath, "");
+        // 0600: this file holds one line per reproduction attempt, including an excerpt of what each
+        // tool RETURNED. `mode` applies only when the file is new, and this call TRUNCATES an existing
+        // one — which keeps its old mode — so narrow it explicitly as well.
+        writeFileSync(auditLogPath, "", { mode: 0o600 });
+        try {
+            chmodSync(auditLogPath, 0o600);
+        }
+        catch {
+            // an audit log we cannot narrow is still an audit log — never lose the run over a mode
+        }
     }
     // Writes the report built from whatever has completed SO FAR, atomically (tmp file + rename,
     // same pattern as the Trust Index crawler's incremental flush) -- a killed/timed-out process
@@ -204,7 +227,14 @@ licenseOpts = {}) {
             return;
         const snapshot = buildReport(currentReports, new Date().toISOString(), {}, [...currentErrors]);
         const tmpPath = `${outPath}.tmp`;
-        writeFileSync(tmpPath, `${JSON.stringify(snapshot, null, 2)}\n`);
+        // Masked at the write: a TOOL NAME is chosen by the server, and a tool called `send_apiKey=…`
+        // put a credential into this report's tool table (measured 2026-08-13).
+        // 0600, and on the TMP file so the rename carries it: this report names every server on
+        // the machine and every tool they expose. `~/.gawk` is 0700, but a mode on the file
+        // survives a copy and a backup — same finding as `monitor.db` earlier today.
+        writeFileSync(tmpPath, `${JSON.stringify(redactDocument(snapshot), null, 2)}\n`, {
+            mode: 0o600,
+        });
         renameSync(tmpPath, outPath);
     };
     // Partial reports: a server that can't be verified is recorded as an error, not an abort.
@@ -215,12 +245,44 @@ licenseOpts = {}) {
             reports.push(await verifyServer(toConfig(name, raw), {
                 mode: unsafe ? "unsafe" : "safe",
                 isolate,
+                serverTimeoutMs,
                 onEvent: (e) => {
                     if (e.type === "sandbox-degraded") {
                         err(`⚠  ${e.server}: ${e.reason}`);
                     }
-                    if (e.type === "raw-observation" && auditLogPath) {
+                    if (e.type === "auth-needed") {
+                        err(`\n  ${e.server}: this server's sign-in lives in its own '${e.tool}' tool.`);
+                        err(`  Open this link to authorise THIS verify session (waiting up to 5 min):`);
+                        err(`    ${e.url}\n`);
+                    }
+                    if (e.type === "auth-ok") {
+                        err(`  ${e.server}: signed in — continuing with the checks.`);
+                    }
+                    if (e.type === "auth-timeout") {
+                        err(`  ${e.server}: sign-in was not completed in 5 minutes — proceeding; ` +
+                            `auth-needing checks will fail honestly.`);
+                    }
+                    if (e.type === "server-abandoned") {
+                        err(`  ${e.server}: ${e.reason} — abandoned after ${e.failedToStart} tools ` +
+                            `(${e.toolsRemaining} not attempted).`);
+                    }
+                    if (e.type === "server-timeout") {
+                        err(`  ${e.server}: server budget of ${Math.round(e.budgetMs / 1000)} s exhausted ` +
+                            `after ${Math.round(e.elapsedMs / 1000)} s at '${e.tool}' — the remaining checks ` +
+                            `are recorded as not attempted; this server is INCOMPLETE, not clean.`);
+                    }
+                    if ((e.type === "auth-needed" || e.type === "auth-ok" ||
+                        e.type === "auth-timeout" || e.type === "server-abandoned" ||
+                        e.type === "server-timeout") && auditLogPath) {
+                        // The panel tails this file to lift the sign-in URL onto the banner mid-run.
+                        // Written as-is: the URL is exactly what the human is shown, the file is 0600.
                         appendFileSync(auditLogPath, `${JSON.stringify(e)}\n`);
+                    }
+                    if (e.type === "raw-observation" && auditLogPath) {
+                        // Masked AT THE WRITE. `resultTextExcerpt` is 2000 chars of whatever the tool
+                        // returned, and on 2026-08-13 a fixture this engine CONVICTED for credential-exposure
+                        // had its key written here in cleartext. Truncation was never a redaction.
+                        appendFileSync(auditLogPath, `${JSON.stringify(redactAuditEvent(e))}\n`);
                     }
                 },
             }));
@@ -303,7 +365,9 @@ licenseOpts = {}) {
         // Final write: the complete report (drift + suppressions included), replacing the
         // in-progress incremental snapshots.
         const tmpPath = `${outPath}.tmp`;
-        writeFileSync(tmpPath, `${JSON.stringify(report, null, 2)}\n`);
+        writeFileSync(tmpPath, `${JSON.stringify(redactDocument(report), null, 2)}\n`, {
+            mode: 0o600,
+        });
         renameSync(tmpPath, outPath);
     }
     const actionable = report.summary.findings > 0 || drifted;
@@ -375,7 +439,9 @@ licenseOpts = {}) {
         ];
         if (behaviourPath && !targets.includes(behaviourPath))
             targets.push(behaviourPath);
-        const freshProfile = behaviourProfile(report);
+        // Masked BEFORE the merge, not after: the merge compares against what is already on disk, so
+        // masking afterwards would rewrite the file on every run as the two forms disagreed.
+        const freshProfile = redactDocument(behaviourProfile(report));
         const verifiedNames = new Set(report.servers.map((s) => s.server));
         for (const target of targets) {
             const isExplicit = target === behaviourPath;
@@ -391,7 +457,16 @@ licenseOpts = {}) {
                     existing = null; // absent or corrupt — the merge treats both as nothing to retain
                 }
                 const merged = mergeBehaviourProfiles(existing, freshProfile, verifiedNames);
-                writeFileSync(target, `${JSON.stringify(merged, null, 2)}\n`);
+                // 0600 for the same reason as the report. `mode` applies only when the file is NEW, so
+                // a profile written before this fix keeps its 0644 until it is recreated — narrowed
+                // explicitly below rather than left to chance.
+                writeFileSync(target, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
+                try {
+                    chmodSync(target, 0o600);
+                }
+                catch {
+                    // a profile we cannot narrow is still a profile — never lose the run over a mode
+                }
                 if (isExplicit)
                     err(`mcpgawk verify: wrote behavioural profile → ${target}`);
             }
@@ -468,6 +543,11 @@ export function egressClusterLines(egressFindings) {
 export function printText(report, log) {
     for (const s of report.servers) {
         log(`\n${s.server} [${s.transport}]: checked ${s.toolsChecked} tool(s)`);
+        if (s.labelNoiseNote) {
+            // The JSON knowing is not the human knowing — kite sat behind blanket labels for two
+            // weeks because no printed line ever said why nothing was exercised.
+            log(`  ! ${s.labelNoiseNote}`);
+        }
         if (s.transport !== "stdio") {
             log(`  (remote — can't sandbox; egress checks N/A, ran: ${s.checksRun.join(", ")})`);
         }
@@ -502,7 +582,9 @@ export function printText(report, log) {
         if (s.skipped.length > 0) {
             const shown = s.skipped
                 .slice(0, 8)
-                .map((k) => `${k.tool}(${k.class})`)
+                // A tool NAME is server-chosen, and this line goes to stdout — which lands in CI logs,
+                // pasted issues and uploaded artefacts. Same reason `scan --json` had to be masked.
+                .map((k) => `${redactText(k.tool)}(${k.class})`)
                 .join(", ");
             const more = s.skipped.length > 8 ? `, +${s.skipped.length - 8} more` : "";
             log(`  - skipped ${s.skipped.length} not-read-only tool(s): ${shown}${more}`);

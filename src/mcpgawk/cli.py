@@ -11,17 +11,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures as _futures
 import json
 import os
 import shlex
 import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
+from typing import Any, NamedTuple
 
-from . import drift, fleet, history, runlog
+from . import configcheck, drift, fleet, history, runlog
 from .fleet import FleetRow
 from .consent import gate_stdio_consent
-from .discover import detect_unscannable, discover_report, discover_servers
+from .discover import detect_unscannable, discover_report
 from .label import build_label, render_cli, render_summary
 from .measure import measure
 from .oauth_scopes import inspect as inspect_oauth_scopes
@@ -62,15 +64,132 @@ def _headers(pairs: list[str] | None) -> dict[str, str]:
     return out
 
 
+class _NoMatchingServers(Exception):
+    """`--only` named nothing that exists. Carries no message: `_run` has already told the user
+    what it looked for and what was there. Exists so that outcome can leave `_run` without
+    violating its 3-tuple return contract."""
+
+
+def _known_names(entries: dict, skipped: list) -> set[str]:
+    """Every name this scan accounted for — probed or declined — under every client's spelling.
+    A server configured HERE is never "beyond this machine": `robinhood-trading` was listed twice,
+    once as a Claude Code server needing credentials and once as an account-hosted connector that
+    "cannot be scanned", because Claude Code's needs-auth cache names both kinds (2026-09-03)."""
+    names: set[str] = set()
+    for n, e in list(entries.items()) + list(skipped):
+        names.add(n)
+        names.update((e.get("_names") or {}).values())
+        names.update(e.get("_aliases") or ())
+    return names
+
+
+def _configured_as_command(parts: list[str], args) -> str | None:
+    """The config name for an ad-hoc `--stdio` command — `_configured_as` for the stdio twin.
+
+    Plain equality on command AND args, no normalisation, one match or none: the same rules and
+    the same reasons. `--only` given means the caller already said what they mean."""
+    if not parts or getattr(args, "only", None):
+        return None
+    try:
+        from .discover import discover_servers
+        cfg = _load_config(args.config) if getattr(args, "config", None) else discover_servers()
+    except Exception:                              # noqa: BLE001 — routing is an optimisation
+        return None
+    matches = [n for n, e in cfg.items() if isinstance(e, dict)
+               and e.get("command") == parts[0] and list(e.get("args") or []) == parts[1:]]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _adhoc_name(label: str, entry: dict | None) -> str | None:
+    """The name an AD-HOC target answers to, for its record's alias: the URL for `--http/--sse`,
+    the command string for `--stdio`. The placeholder labels (`cli-http`, …) are refused by the
+    store — see `history.SYNTHETIC_NAMES` — so until 2026-09-03 an unknown URL scanned ad hoc was
+    recorded under a key with NO alias at all: a record nothing could `resolve`, `approve` or
+    `wrong`. "A name a server answers to" (`51a0068`) is the URL you typed."""
+    if label not in history.SYNTHETIC_NAMES or not isinstance(entry, dict):
+        return None
+    if entry.get("url"):
+        return str(entry["url"])
+    if entry.get("command"):
+        return shlex.join([str(entry["command"]), *(str(a) for a in (entry.get("args") or []))])
+    return None
+
+
+def _configured_as(url: str, args) -> str | None:
+    """The config name for an ad-hoc `--http/--sse` URL, when scanning it AS that server is safe.
+
+    WHY ROUTE RATHER THAN RELABEL (2026-08-27). `mcpgawk scan --http <url>` against a URL the machine
+    already has configured used to produce a SECOND record for one server — that is how
+    `mcp:Notion MCP` (aliases `['cli-http']`, no config name) came to exist beside the real one, and
+    it took a hand repair of the founder's trust store to undo.
+
+    The tempting fix — stamp the config NAME onto the ad-hoc record as an alias — recreates the bug
+    for every credentialled server. An ad-hoc probe carries no credential discriminator, so it keys
+    bare `mcp:<asserted>` while the config record sits at `mcp:<asserted>#<fingerprint>`; one alias
+    on two records makes `resolve` return None, and `approve <name>` stops landing anywhere. That is
+    byte-for-byte the state that was repaired by hand, minted fresh by its own fix.
+
+    So the scan is ROUTED down the config path instead: same entry dict, same `with_stored_login`,
+    same inputs to `key_for`. The key is identical by construction and there is no relabelling logic
+    to get wrong.
+
+    Returns None — falling through to the ad-hoc path, the safe direction — when:
+      * the caller passed `--header`: they are deliberately probing with DIFFERENT credentials, and
+        silently swapping in the configured ones would answer a question nobody asked;
+      * the caller passed `--login`: they explicitly want the browser flow against this URL;
+      * `--only` was given too, so the caller has already said what they mean;
+      * the URL matches no entry, or MORE THAN ONE. Ambiguity is refused rather than guessed, the
+        same rule `resolve` and `_shed_credential_keys` follow — picking one would attach this scan
+        to whichever entry happened to sort first.
+
+    Matching is plain equality. Deliberately no normalisation: a near-miss falling through costs one
+    extra record, while a wrong match writes a sighting into another server's history.
+    """
+    if getattr(args, "header", None) or getattr(args, "login", False) or getattr(args, "only", None):
+        return None
+    try:
+        from .discover import discover_servers
+        cfg = _load_config(args.config) if getattr(args, "config", None) else discover_servers()
+    except Exception:                              # noqa: BLE001 — routing is an optimisation
+        return None
+    matches = [n for n, e in cfg.items() if isinstance(e, dict) and e.get("url") == url]
+    return matches[0] if len(matches) == 1 else None
+
+
 async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[str, dict]]]:
     """Returns snapshots, the raw entry (command/args/headers) each came from, and the targets we
     deliberately did NOT scan (consent withheld). The entries feed the opt-in supply-chain/
     oauth-scopes checks and the fleet view's auth step; the skipped list keeps unscanned servers
     VISIBLE, so the summary can never imply coverage it doesn't have."""
+    if args.stdio and (routed := _configured_as_command(shlex.split(args.stdio), args)):
+        # The stdio twin of the URL routing below: a configured command scanned ad hoc used to
+        # mint a nameless orphan record beside the real one (the config entry carries env —
+        # credentials — so the two even key differently). Same entry, same path, same record.
+        print(f"mcpgawk: `{args.stdio}` is configured here as `{routed}` — scanning it as that "
+              f"server, so the result lands on its existing record.", file=sys.stderr)
+        args.only = routed
+        args.stdio = None
+        # Typing `--stdio <command>` IS the consent to launch it: an explicit `--stdio` never
+        # reached the consent gate before routing existed, and routing must not take that away.
+        # Without this, a non-interactive run with no --yes was DECLINED at the gate and rendered
+        # as a skipped row — a CI script that scanned a command which happened to be configured
+        # silently stopped measuring (review, 2026-09-03).
+        args.yes = True
     if args.stdio:
         parts = shlex.split(args.stdio)
-        entry = {"command": parts[0], "args": parts[1:]}
+        # An mcp.json entry is heterogeneous by definition — a command string beside an args list,
+        # or a url beside a headers mapping. Declared once here so the http branch below is the same
+        # variable and the same shape, rather than mypy inferring `Sequence[str]` from whichever
+        # branch it saw first and then rejecting the other one's headers dict.
+        entry: dict[str, Any] = {"command": parts[0], "args": parts[1:]}
         return [await probe_stdio("cli-stdio", parts[0], parts[1:])], {"cli-stdio": entry}, []
+    if (args.http or args.sse) and (routed := _configured_as(args.http or args.sse, args)):
+        # Scanning a configured server BY URL is still scanning that server. Say so, then let the
+        # config path below do it — see _configured_as for why relabelling would split the record.
+        print(f"mcpgawk: {args.http or args.sse} is configured here as `{routed}` — scanning it as "
+              f"that server, so the result lands on its existing record.", file=sys.stderr)
+        args.only = routed
+        args.http = args.sse = None
     if args.http or args.sse:
         url = args.http or args.sse
         transport = "http" if args.http else "sse"
@@ -82,7 +201,20 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
         from .probe import HTTP_TIMEOUT
         timeout = HTTP_TIMEOUT
         if getattr(args, "login", False):
-            from .oauth_login import build_login_provider
+            from .oauth_login import build_login_provider, store_preregistered_client
+            if getattr(args, "oauth_client_id", None):
+                _secret = (os.environ.get(args.oauth_client_secret_env)
+                           if getattr(args, "oauth_client_secret_env", None) else None)
+                if getattr(args, "oauth_client_secret_env", None) and not _secret:
+                    print(f"mcpgawk scan: --oauth-client-secret-env "
+                          f"{args.oauth_client_secret_env} is not set in the environment",
+                          file=sys.stderr)
+                    return 2
+                _ruri = store_preregistered_client(
+                    url, args.oauth_client_id, _secret,
+                    getattr(args, "oauth_redirect_uri", None))
+                print(f"  Using your pre-registered OAuth client. The provider must have "
+                      f"this EXACT redirect URI registered: {_ruri}", file=sys.stderr)
             auth, server = build_login_provider(url)
             timeout = 330.0
         # `--http`/`--sse` orders the attempts; it does not decide what we believe. The one case we
@@ -94,6 +226,15 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
         finally:
             if server is not None:
                 server.shutdown()
+        if auth is not None and snap.error:
+            # `--login` IS the retry, so the scan-path advice "retry with `--login`" is circular
+            # here, and a registration refusal must name the way through. `_signin_failure_line`
+            # did exactly that — for the FLEET path only; this single-URL flow, the one the
+            # panel's "Sign in now" button runs, printed the circle until 2026-09-03 (founder's
+            # panel: "sign-in for figma did not complete — Scanned locally — your server
+            # inventory never left this machine.").
+            from .oauth_login import last_flow_error
+            snap.error = _honest_login_error(url, snap.error, last_flow_error())
         return [snap], {f"cli-{transport}": entry}, []
     only = set(args.only.split(",")) if args.only else None
     # Zero-config: with no path given, DISCOVER every MCP server configured across the machine's IDE
@@ -106,7 +247,28 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
         # Module-level name on purpose: tests stub `cli.discover_report` to inject a fleet, the
         # same seam they used on discover_servers before the report existed.
         cfg, sources = discover_report()
-    targets = [(n, e) for n, e in cfg.items() if not only or n in only]
+    def _selected(name: str, entry: dict) -> bool:
+        # Match the display name OR any name a client actually uses for this server. After dedup the
+        # display name is one client's; asking for the name YOUR client shows you matched nothing at
+        # all — not even an "unknown server" — so the server was unreachable by the only name you had.
+        if not only:
+            return True
+        return bool(only & ({name} | set((entry.get("_names") or {}).values())
+                            | set(entry.get("_aliases") or ())))
+
+    targets = [(n, e) for n, e in cfg.items() if _selected(n, e)]
+    if only and not targets:
+        # "Nothing matched what you asked for" and "you have nothing" are different answers, and
+        # printing the empty-fleet copy for the first one told a user with 30 servers that they had
+        # none. Name what was actually there so a typo is obvious.
+        print(f"mcpgawk: no server matches --only {','.join(sorted(only))}.", file=sys.stderr)
+        if cfg:
+            print(f"  configured here: {', '.join(sorted(cfg))}", file=sys.stderr)
+        # RAISE, never `return 2`: this function's contract is a 3-tuple and its caller unpacks it
+        # unconditionally, so returning an int crashed the CLI on any --only typo. The caller turns
+        # this into exit 2, which also keeps it out of main()'s catch-all — a typo is a normal
+        # outcome, not a tool ERROR to be recorded in the run log as one.
+        raise _NoMatchingServers
     if is_discovery and not targets:
         # "Nothing was found" and "nothing was looked at" must never render alike: say what WAS
         # examined, and name every source that existed but yielded nothing readable — an empty
@@ -131,8 +293,121 @@ async def _run(args) -> tuple[list[ServerSnapshot], dict[str, dict], list[tuple[
     # would let the summary imply coverage we don't have.
     ok_names = {n for n, _ in approved}
     skipped = [(n, e) for n, e in targets if n not in ok_names]
-    snaps = await asyncio.gather(*(probe(e, n) for n, e in approved))
-    return list(snaps), {n: e for n, e in approved}, skipped
+    # USE THE LOGIN THE USER ALREADY COMPLETED. `as_authenticated_remote` existed, was tested, and
+    # was called by NOTHING — so signing in stored a token that no scan ever picked up, and the
+    # next run still reported "needs credentials". Measured on notion 2026-08-27: sign-in
+    # succeeded, the token worked when passed by hand with --header, and the scan refused anyway.
+    # Attaching it here is not new consent: the browser sign-in WAS the consent, and a scan only
+    # lists what the server exposes.
+    approved = [(n, with_stored_login(e)) for n, e in approved]
+    held_snaps: dict[str, ServerSnapshot] = {}
+    if getattr(args, "sign_in", False):
+        held_snaps = _measure_through_signin(approved)
+    snaps = await asyncio.gather(*(probe(e, n) for n, e in approved if n not in held_snaps))
+    out = list(snaps) + [held_snaps[n] for n, _ in approved if n in held_snaps]
+    return out, {n: e for n, e in approved}, skipped
+
+
+def _measure_through_signin(approved: list[tuple[str, dict]]) -> dict[str, ServerSnapshot]:
+    """Hold ONE session open across a human sign-in, then measure the server through it.
+
+    WHY THIS PATH EXISTS. kite binds a login to the single MCP session that asked for it (measured
+    twice, 2026-08-27: a brand new session is "Please log in first" hours after a successful
+    browser login). Every other measuring path opens its own session, so the SIGNED-IN state of an
+    in-band-auth server has never been observed by this product — the sign-in button held a
+    session, handed out a link, and let the session sleep and close having measured nothing.
+
+    REFUSALS, deliberate, each because guessing would produce a reassuring answer that is not
+    true:
+      * more than one server selected — the flow needs a human at a browser, one server at a
+        time; which one they signed into is not something to infer;
+      * no terminal to ask on — with nobody to wait for, this would measure an UNAUTHENTICATED
+        session and record it as signed-in, which is this product's failure mode exactly;
+      * the server offers no in-band login tool, or the sign-in did not go through — the ordinary
+        probe still runs, so the scan reports what it always would, and says why.
+    """
+    from . import remote_login
+    if len(approved) != 1:
+        print("mcpgawk scan --sign-in: name ONE server (--only <name>) — a sign-in needs a person "
+              "at a browser, and which server they signed into is not something to infer.",
+              file=sys.stderr)
+        return {}
+    # A pipe is allowed to stand in for the terminal ONLY when the caller says a person is behind
+    # it: the panel sets MCPGAWK_SIGNIN_WAIT=stdin, shows the link, and writes one newline when the
+    # human clicks "I have signed in". Bare non-TTY still refuses — nobody to wait for.
+    piped_person = os.environ.get("MCPGAWK_SIGNIN_WAIT") == "stdin"
+    if not sys.stdin.isatty() and not piped_person:
+        print("mcpgawk scan --sign-in: needs a terminal to wait on. Without one it would measure "
+              "a session nobody signed into and record it as signed-in.", file=sys.stderr)
+        return {}
+    name, entry = approved[0]
+    launch = entry
+    if entry.get("command"):
+        # A Desktop-extension entry launches through placeholders (`${__dirname}`); `probe`
+        # resolves them before launching and this path must launch the SAME thing, or the
+        # literal string fails to start and the user is told the server "does not sign in
+        # through a login tool of its own" — a wrong reason for a launch that never happened.
+        from . import dxt as _dxt
+        launch = _dxt.resolve_for_launch(entry) or entry
+    held = remote_login.held_session(launch.get("url"), command=launch.get("command"),
+                                     args=launch.get("args"), env=launch.get("env"),
+                                     headers=launch.get("headers"))
+    if held is None:
+        print(f"mcpgawk scan --sign-in: {name} does not sign in through a login tool of its own — "
+              f"scanning it the ordinary way.", file=sys.stderr)
+        return {}
+    try:
+        print(f"\n{name} says:\n{held.notice}\n", file=sys.stderr)
+        print(f"Open this and sign in — it is bound to the session being held for you:\n\n"
+              f"  {held.auth_url}\n", file=sys.stderr)
+        # The SAME phrase the OAuth flow prints, so the panel's one link-finder serves both.
+        print(f"  If it doesn't open, paste this into a browser:\n    {held.auth_url}\n",
+              file=sys.stderr, flush=True)
+        # The prompt goes to STDERR like every other line of this conversation: `input()` writes
+        # its prompt to stdout, which under `--json` put "Press Enter once…" inside the document.
+        print("Press Enter once the browser says you are signed in... ", end="", file=sys.stderr,
+              flush=True)
+        try:
+            input()
+        except EOFError:
+            # The pipe closed with no newline: the panel (or terminal) went away before anyone
+            # said "signed in". Nobody answered, so nothing is measured as signed-in.
+            print(f"mcpgawk scan --sign-in: {name}: nobody confirmed the sign-in (input closed) — "
+                  f"scanning it the ordinary way instead.", file=sys.stderr)
+            return {}
+        try:
+            authorised, words = held.authorisation()
+            if not authorised:
+                print(f"mcpgawk scan --sign-in: {name} does not consider this session signed in "
+                      f"({words.strip()[:200]}) — scanning it the ordinary way instead.",
+                      file=sys.stderr)
+                return {}
+            print(f"  signed in — {words.strip()[:200]}", file=sys.stderr)
+            snap = held.measure(entry, name)
+            # Leave the durable mark of THIS completed sign-in, and stamp the measurement with it,
+            # so the record says which sign-in it was measured through and the panel's tile stops
+            # asking for one that already happened. In-band servers have no token to store; the
+            # mark is the only evidence there is.
+            _login_url = remote_login.login_url(entry, name)
+            if _login_url:
+                try:
+                    from .oauth_login import mark_inband_login
+                    snap.login_id = mark_inband_login(_login_url)
+                except Exception as exc:           # noqa: BLE001 — a lost mark is not a lost scan
+                    print(f"mcpgawk scan --sign-in: could not record the sign-in mark: {exc}",
+                          file=sys.stderr)
+            print(f"  measured {name} through the signed-in session: {len(snap.tools or [])} "
+                  f"tools", file=sys.stderr, flush=True)
+            return {name: snap}
+        except (remote_login.HeldSessionEnded, TimeoutError, _futures.TimeoutError) as e:
+            # The hold is five minutes from connect; a person can take longer. An expired or
+            # dropped session is a reason to scan the ordinary way and say why — not a traceback
+            # in place of the report.
+            print(f"mcpgawk scan --sign-in: {name}: {e} — scanning it the ordinary way instead.",
+                  file=sys.stderr)
+            return {}
+    finally:
+        held.close()
 
 
 def _label_for(sn: ServerSnapshot, m, entry: dict, args, shadow: dict | None = None) -> dict:
@@ -141,8 +416,12 @@ def _label_for(sn: ServerSnapshot, m, entry: dict, args, shadow: dict | None = N
     refreshed row would start disagreeing with the row it replaced."""
     sigs = None
     if not args.no_signals:
+        # Config-only findings ride the same carrier as bounded signals so every renderer keyed on
+        # the kind prefix carries them — but they come from the ENTRY, not the snapshot, so a
+        # server also gets them when probing found nothing to say (see configcheck.py).
         sigs = (as_dicts(detect(sn)) + as_dicts((shadow or {}).get(sn.name, []))
-                + as_dicts(detect_card_mismatch(sn)) + as_dicts(detect_dynamic_dispatch(sn)))
+                + as_dicts(detect_card_mismatch(sn)) + as_dicts(detect_dynamic_dispatch(sn))
+                + as_dicts(configcheck.check(sn.name, entry)))
     label = build_label(sn, m, bounded_signals=(sigs or None))
     # Both opt-in: supply-chain hits a public registry (egress), oauth-scopes reads a credential the
     # user already supplied (no egress, but still consent-gated).
@@ -168,7 +447,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Free, and included here:\n"
             "  verify    run a server in a sandbox and watch what it actually does\n"
             "  decide    review and approve servers that changed since you trusted them\n\n"
-            "gawk Platform — continuous protection (£29/month — https://mcp.gawk.dev/pricing.html):\n"
+            "mcpgawk Platform — continuous protection (£29/month — https://mcp.gawk.dev/pricing.html):\n"
             + "".join(f"  {c:<9} {d}\n" for c, d in PLATFORM_CAPABILITIES.items())
             + "Run `mcpgawk <capability>` once subscribed. Scanning, behavioural verification\n"
             + "and the runtime guard stay free and open-source.\n\n"
@@ -181,14 +460,45 @@ def build_parser() -> argparse.ArgumentParser:
     # cosmetic: this CLI shipped without it, so a seven-release-stale install stayed invisible for
     # six days while every "verified live" claim was checked against the repo instead of the
     # binary. A tool that cannot state its own version cannot be supported.
-    p.add_argument("--version", action="version", version=f"mcpgawk {_installed_version()}")
+    # ...and it must answer the question a person is ACTUALLY asking. A tester ran this, read
+    # `mcpgawk 0.1.29`, and reported it as a problem — because the number alone cannot tell you
+    # whether it is the current build. Settling that took eight checks across three registries
+    # (2026-08-19). The staleness check already fetches PyPI on ordinary runs; --version now says
+    # what it found. Line one is unchanged, byte for byte, because install.sh and every human habit
+    # depend on it.
+    #
+    # A CUSTOM ACTION, not `action="version"`: the latter needs its string at parser-BUILD time,
+    # which would put a network call in front of `--help` and every subcommand.
+    class _Version(argparse.Action):
+        def __init__(self, option_strings, dest, **kw):
+            super().__init__(option_strings, dest, nargs=0, **kw)
+
+        def __call__(self, parser_, namespace, values, option_string=None):
+            print(f"mcpgawk {_installed_version()}")
+            try:
+                from .staleness import currency_line
+                print(f"  {currency_line()}")
+            except Exception:                      # noqa: BLE001 — never fail the one command
+                pass                               # that people run when something is wrong
+            parser_.exit()
+
+    p.add_argument("--version", action=_Version)
     sub = p.add_subparsers(dest="cmd", required=True)
     n = sub.add_parser("install-node",
-                       help="fetch the Node runtime `verify` needs (26 MB download, no admin rights)")
+                       help="fetch the Node runtime `verify` needs (26 MB download, no admin rights)",
+                       description="Download the Node runtime that `verify` uses to run a server "
+                                   "in a sandbox. About 26 MB, into mcpgawk's own directory: no "
+                                   "admin rights, and nothing on the system is changed.")
     n.add_argument("--yes", "-y", action="store_true",
                    help="skip the confirmation — required in a non-interactive session, because "
                         "this downloads and then RUNS third-party code")
-    s = sub.add_parser("scan", help="measure MCP server(s) locally")
+    s = sub.add_parser("scan", help="measure MCP server(s) locally",
+                       description="Measure MCP servers on this machine: every tool they expose, "
+                                   "what each one costs your context window, and what it can "
+                                   "reach. With no argument it reads every agent config it can "
+                                   "find. Give it a config path to scan only that client. Local "
+                                   "servers are launched only after you say yes, because scanning "
+                                   "one means running its code.")
     s.add_argument("config", nargs="?", help="path to an mcp.json config")
     s.add_argument("--stdio", help='one stdio server, e.g. "npx -y @modelcontextprotocol/server-filesystem /tmp"')
     s.add_argument("--http", help="one streamable-HTTP server URL")
@@ -197,6 +507,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--login", action="store_true",
                    help="for a remote --http/--sse server that needs OAuth: open the browser, sign "
                         "in once, and scan (token stored locally in ~/.gawk/oauth)")
+    s.add_argument("--oauth-client-id",
+                   help="with --login, for a server that REFUSES automatic client registration "
+                        "(figma, Slack — enterprise posture): use this pre-registered OAuth "
+                        "client id. Register the pinned redirect URI mcpgawk prints with the "
+                        "provider first")
+    s.add_argument("--oauth-client-secret-env", metavar="VAR",
+                   help="environment variable holding the pre-registered client's secret "
+                        "(never passed on the command line; omit for a public client + PKCE)")
+    s.add_argument("--oauth-redirect-uri",
+                   help="override the pinned redirect URI (must match the provider's "
+                        "registration EXACTLY)")
+    s.add_argument("--sign-in", dest="sign_in", action="store_true",
+                   help="for a server that signs in through its OWN login tool (kite): hold one "
+                        "session open, wait while you sign in, then measure THROUGH that session")
     s.add_argument("--only", help="comma-separated server names to scan from the config")
     s.add_argument("--yes", "-y", action="store_true",
                    help="launch discovered/configured local (stdio) servers WITHOUT the consent "
@@ -250,7 +574,11 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--server", metavar="NAME", help="one server (name or alias) instead of all")
 
     a = sub.add_parser("approve",
-                       help="accept a server's current tools as the trusted baseline (clears DRIFT)")
+                       help="accept a server's current tools as the trusted baseline (clears DRIFT)",
+                       description="Accept a server's current tools as the baseline you trust. "
+                                   "Until you do, a tool that appeared after the last baseline is "
+                                   "treated as drift and its calls are blocked. Run it with no "
+                                   "server name to see what is waiting.")
     a.add_argument("server", nargs="?",
                    help="the server name as it appears in your config, or its asserted identity")
     a.add_argument("--all", action="store_true", help="approve every server with pending drift")
@@ -325,18 +653,64 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--port", type=int, default=7717, help="local port (default: 7717)")
     d.add_argument("--no-open", action="store_true", help="print the URL, do not open a browser")
 
-    sub.add_parser(
+    st = sub.add_parser(
         "status",
         help="is anything watching, against what, and when did it last see something",
         description="One answer to 'am I protected'. Read-only — opens nothing, starts nothing. "
                     "Coverage is reported PER AGENT, never in aggregate: the hook installs into "
                     "Claude Code only, so a single cheerful tick would tell a Cursor user they "
                     "are covered when they are not.")
+    st.add_argument("--json", action="store_true",
+                    help="the same facts as JSON (schema gawk.status/1), plus one row per server "
+                         "with approval provenance, last sighting, tier and verify facts — for "
+                         "a supervising agent or a client with no hook")
+    cu = sub.add_parser(
+        "checkup",
+        help="run the WHOLE product on this machine and capture what happened — start here",
+        description=(
+            "Exercises every surface in turn — version, status, scan, verify, the run history "
+            "and every panel tab — then writes one file with what each step did. A step that "
+            "fails is kept, not hidden: that is the point. Steps that would launch your local "
+            "servers ask once and can be declined without stopping the rest. Nothing is "
+            "uploaded. Stop it at any time with Ctrl-C and the bundle is still written."
+        ),
+    )
+    cu.add_argument("--output", metavar="PATH",
+                    help="write here instead of ./mcpgawk-checkup-<timestamp>.zip")
+    cu.add_argument("--note", metavar="TEXT",
+                    help="what you were trying to do — travels in the bundle")
+    cu.add_argument("--yes", "-y", action="store_true",
+                    help="do not ask before launching local servers (for a non-interactive run)")
+    cu.add_argument("--strict", action="store_true",
+                    help="remove hostnames, package names and command arguments as well")
+
+    rp = sub.add_parser(
+        "report",
+        help="write ONE file we can diagnose from — send it when something goes wrong",
+        description=(
+            "Collects everything about this machine into a single redacted zip: version and "
+            "how mcpgawk was installed, per-agent hook state, the entire run history, the "
+            "entire call log, every verify run, open drift alerts, and an inventory of both "
+            "state directories. Nothing is uploaded — the command prints a path and stops. "
+            "Server responses are removed by field name, home directories become ~, and every "
+            "URL keeps its parameter names and loses their values. A store that could not be "
+            "read is listed as 'unavailable', which means nobody looked — never 'nothing there'."
+        ),
+    )
+    rp.add_argument("--output", metavar="PATH",
+                    help="write here instead of ./mcpgawk-report-<timestamp>.zip")
+    rp.add_argument("--strict", action="store_true",
+                    help="also remove hostnames, package names and command arguments — for a "
+                         "machine whose owner will not let internal infrastructure leave it "
+                         "(credentials, server responses and env values are always removed)")
+    rp.add_argument("--note", metavar="TEXT",
+                    help="what you were doing when it went wrong — travels in the bundle")
+
     r = sub.add_parser(
         "runs",
         help="what has run on this machine, and how it went",
         description=(
-            "Your local run history — scans, and (with gawk Platform) verify, enforce and monitor "
+            "Your local run history — scans, and (with mcpgawk Platform) verify, enforce and monitor "
             "runs, newest first. Read from ~/.mcpgawk/runs.db; nothing is uploaded anywhere. "
             "A run that never closed shows as RUNNING, and as INCOMPLETE once its process is gone "
             "— it is never reported as success."
@@ -458,12 +832,28 @@ def _skills(args) -> int:
         for s in snaps:
             hosts = ", ".join(s.hosts)
             print(f"\n  {s.name}  ({s.root}; loaded by: {hosts})")
-            scope = f"    {len(s.files)} file(s) scanned"
+            # "scanned" meant "recorded", and a binary file is recorded with a hash and never
+            # content-scanned — so a skill shipping a .bin/.pdf payload reported "12 file(s)
+            # scanned … clean". Say how many were actually READ.
+            read_n = sum(1 for f in s.files if getattr(f, "kind", "") not in ("binary", "oversize"))
+            scope = f"    {read_n} file(s) content-scanned of {len(s.files)} recorded"
             if s.capped:
-                scope += f" of {s.files_seen} seen — CAPPED, the remainder was not examined"
+                scope += f" ({s.files_seen} seen — CAPPED, the remainder was not examined)"
             print(scope)
+            if s.skipped:
+                # The file cap already announced itself and these did not. A payload at depth 11,
+                # behind a symlink, or in an unreadable directory left no trace at all.
+                print(f"    {len(s.skipped)} path(s) NOT examined — absence of a finding does not "
+                      f"cover them:")
+                for rel, why in s.skipped[:8]:
+                    print(f"      {rel} — {why}")
+                if len(s.skipped) > 8:
+                    print(f"      …and {len(s.skipped) - 8} more")
             if not s.findings:
-                print("    clean under the local detectors")
+                unread = (len(s.files) - read_n) + len(s.skipped)
+                print("    clean under the local detectors" if not unread else
+                      f"    no findings in what was read — {unread} file(s)/path(s) were not "
+                      f"content-scanned, so this is not a clean bill")
             for f in s.findings:
                 print(f"    ⚠ [{f.kind}] {f.tool}: {f.evidence}")
         if snaps:
@@ -483,6 +873,19 @@ def _baseline(args) -> int:
     """
     from . import baseline as _baseline_mod
 
+    # Third surface of the same defect: `baseline.export` reads through history.load, so an
+    # unreadable store exported as "Nothing approved yet" — indistinguishable from a fresh machine
+    # on the command whose entire job is showing what you agreed to trust.
+    _, _store_err = _store_or_say_why(getattr(args, "history", None))
+    _warn_if_store_unreadable(_store_err)
+    # --json returned the empty export with exit 0 BEFORE this check ran, so an unreadable store
+    # emitted `{"servers": {}}` and exit 0 — a CI gate parsing that reads "nothing approved" as a
+    # FACT when nobody could read the file. "It ran but could not finish" is INCOMPLETE = exit 4
+    # (the documented vocabulary: never 0), for the machine surface as much as the human one.
+    if _store_err and args.json:
+        print(json.dumps({"error": "the approval store is unreadable; what you approved is UNKNOWN",
+                          "servers": {}}, indent=2, sort_keys=True))
+        return 4
     data = _baseline_mod.export(getattr(args, "history", None))
     servers = data["servers"]
 
@@ -500,6 +903,10 @@ def _baseline(args) -> int:
         return 0
 
     if not servers:
+        if _store_err:
+            print("Nothing can be shown — the approval store is unreadable, so what you approved "
+                  "is UNKNOWN. See the warning above.")
+            return 4       # INCOMPLETE: ran but could not finish. 1 means findings; this is neither.
         print("Nothing approved yet. Run `mcpgawk scan`, then `mcpgawk approve <server>` to set "
               "the baseline that verify and monitor will compare against.")
         return 0
@@ -512,8 +919,39 @@ def _baseline(args) -> int:
         print(f"  {key}{alias}")
         print(f"    pin        {rec.get('pin') or '—'}")
         print(f"    tools      {len(rec.get('tools') or {})}")
-        print(f"    approved   {rec.get('approved_at') or '—'}")
+        if rec.get("approved_at"):
+            print(f"    approved   {rec['approved_at']}"
+                  f"{' by ' + rec['approved_by'] if rec.get('approved_by') else ''}")
+        else:
+            # Before 2026-09-03 the sighting's time was printed under "approved": a borrowed date.
+            print(f"    approved   time and actor not recorded · baseline measured "
+                  f"{rec.get('measured_at') or '—'}")
     return 0
+
+
+def _store_or_say_why(path: str | None = None) -> "tuple[dict, str | None]":
+    """Read the trust store, and hand back WHY it came back empty.
+
+    `history.load()` throws away the reason `load_checked()` was built to return, and every CLI
+    surface used it. Proven 2026-08-18 with a truncated history.json — the file holding every
+    approval — where `mcpgawk approve --list` answered "Nothing to approve — every tracked server
+    matches its approved baseline." An unreadable store rendered as a clean bill of health on the
+    command a user runs to ask exactly that question.
+
+    panel.py and status.py were fixed for this; the CLI was not. Degrading rather than raising is
+    still right — a security tool that refuses to start because its own store is damaged does more
+    harm than the drift it was watching — but the reason has to travel with the result.
+    """
+    store, err = history.load_checked(path or history.default_path())
+    return store, err
+
+
+def _warn_if_store_unreadable(err: "str | None") -> None:
+    if err:
+        print(f"mcpgawk: WARNING — the approval store could not be read ({err}).\n"
+              f"         What follows is NOT a clean result; it is no result. Nothing below can "
+              f"be trusted as 'unchanged' until this file is readable again:\n"
+              f"         {history.default_path()}", file=sys.stderr)
 
 
 def _approve(args) -> int:
@@ -526,11 +964,16 @@ def _approve(args) -> int:
         print(f"mcpgawk approve: refusing — {blocked}", file=sys.stderr)
         return 4
     path = history.default_path()
-    store = history.load(path)
+    store, _store_err = _store_or_say_why(path)
+    _warn_if_store_unreadable(_store_err)
     waiting = history.pending(store)
 
     if args.list or (not args.server and not args.all):
         if not waiting:
+            if _store_err:
+                print("Nothing to compare — the approval store is unreadable, so whether anything "
+                      "changed is UNKNOWN. See the warning above.")
+                return 4   # INCOMPLETE: ran but could not finish. 1 means findings; this is neither.
             print("Nothing to approve — every tracked server matches its approved baseline.")
             return 0
         print(f"{len(waiting)} server(s) changed since you approved them:\n")
@@ -544,6 +987,16 @@ def _approve(args) -> int:
 
     targets = waiting if args.all else [k for k in [history.resolve(store, args.server)] if k]
     if not targets:
+        # Ambiguity gets its own message. "No tracked server matches" would be a lie when the
+        # problem is that SEVERAL do, and approving the wrong one moves a baseline the operator
+        # never looked at.
+        candidates = history.resolve_all(store, args.server)
+        if len(candidates) > 1:
+            print(f"{args.server!r} matches {len(candidates)} tracked servers — refusing to guess "
+                  f"which baseline to move. Approve one by its own key:", file=sys.stderr)
+            for key in candidates:
+                print(f"    mcpgawk approve {key}", file=sys.stderr)
+            return 2
         print(f"No tracked server matches {args.server!r}. "
               f"Try `mcpgawk approve --list`.", file=sys.stderr)
         return 2
@@ -586,7 +1039,7 @@ def _wrong(args) -> int:
     return 0
 
 
-# The paid capabilities, reachable as `mcpgawk <capability>` when gawk Platform is installed.
+# The paid capabilities, reachable as `mcpgawk <capability>` when mcpgawk Platform is installed.
 #
 # ONE BINARY, on purpose (2026-07-26). Two reasons, both load-bearing:
 #   1. `gawk` cannot be an executable name. It is GNU AWK — it owns /usr/bin/gawk across the
@@ -631,7 +1084,7 @@ ACCOUNT_COMMANDS = {
 #: reply must confirm they are in the right place and name the ONE missing step — never read as
 #: "you typed something wrong".
 _ACCOUNT_NEEDS_PLATFORM = (
-    "mcpgawk {cmd}: the gawk Platform isn't installed in this environment yet.\n"
+    "mcpgawk {cmd}: the mcpgawk Platform isn't installed in this environment yet.\n"
     "Your licence unlocks it, and your purchase email has the one-line install command.\n"
     "Lost it? https://mcp.gawk.dev/activate.html — or reply to the receipt and we'll resend.\n"
     "The free scanner (`mcpgawk scan`) keeps working either way."
@@ -639,7 +1092,7 @@ _ACCOUNT_NEEDS_PLATFORM = (
 
 
 def _run_account_command(command: str, rest: list[str]) -> int:
-    """Delegate an account command to gawk Platform, or explain honestly that it isn't here.
+    """Delegate an account command to mcpgawk Platform, or explain honestly that it isn't here.
 
     Same optional-local-import shape as the capabilities: the free scanner is published to PyPI on
     its own and must never depend on, or ship, the paid engine.
@@ -657,12 +1110,12 @@ def _run_account_command(command: str, rest: list[str]) -> int:
 #: carried into this dispatch and `push` was not — so the dashboard referenced a command that no
 #: install, free or paid, could actually run. Same optional-import delegation as everything paid.
 PLATFORM_COMMANDS = {
-    "push": "send a scan receipt to your hosted fleet view (gawk Platform)",
+    "push": "send a scan receipt to your hosted fleet view (mcpgawk Platform)",
 }
 
 _PLATFORM_COMMAND_UNAVAILABLE = (
     "mcpgawk {cmd}: {desc}.\n"
-    "This is a gawk Platform command and the Platform isn't installed in this environment.\n"
+    "This is a mcpgawk Platform command and the Platform isn't installed in this environment.\n"
     "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
     "The free scanner (`mcpgawk scan`) stays free and open-source either way."
 )
@@ -695,7 +1148,7 @@ PLATFORM_CAPABILITIES = {
 
 _PLATFORM_UNAVAILABLE = (
     "mcpgawk {cap}: {desc}.\n"
-    "This is a gawk Platform capability and it isn't installed in this environment.\n"
+    "This is a mcpgawk Platform capability and it isn't installed in this environment.\n"
     "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
     "  Already subscribed? Your purchase email has the install instructions.\n"
     "The free scanner (`mcpgawk scan`) stays free and open-source either way."
@@ -703,7 +1156,7 @@ _PLATFORM_UNAVAILABLE = (
 
 
 def _run_platform_capability(capability: str, rest: list[str]) -> int:
-    """Delegate to gawk Platform if it is installed, else say so honestly and exit 3.
+    """Delegate to mcpgawk Platform if it is installed, else say so honestly and exit 3.
 
     The import is deliberately OPTIONAL and local: the free scanner is published to PyPI on its
     own and must never depend on, or ship, the paid engine. A paid install supersedes the free
@@ -733,6 +1186,23 @@ def _protect() -> int:
 
     print("mcpgawk — checking what your agents can call, and turning protection on.\n")
 
+    # Discover local servers ONCE, before any branch. The consent question needs the count, and the
+    # end-of-run coverage report needs the NAMES on every REMOTE_ONLY path — including a SAVED
+    # consent, which skips the question entirely. Binding local_servers only inside `if choice is
+    # None` left the coverage report reading an empty list on a saved consent (or the saved-launch
+    # downgrade below), reporting "nothing skipped" while local servers went unchecked — the exact
+    # omission ea82ea1 fixed, reintroduced for the saved-consent case.
+    try:
+        from .discover import discover_servers
+        found = discover_servers()
+        entries = found[0] if isinstance(found, tuple) else found
+        local_servers = [n for n, e in (entries or {}).items()
+                         if isinstance(e, dict) and e.get("command")]
+        agents = _consent_agents(entries)
+    except Exception:                              # noqa: BLE001 - discovery is best-effort here
+        local_servers, agents = [], []
+    local = len(local_servers)
+
     choice = protect.load_consent()
 
     # A SAVED consent is not a human. `launch` means "start every local stdio server", which puts
@@ -752,16 +1222,6 @@ def _protect() -> int:
 
     scan_args = ["scan", "--track"]
     if choice is None:
-        # Count local servers first so the question can be specific about what it is asking for.
-        try:
-            from .discover import discover_servers
-            found = discover_servers()
-            entries = found[0] if isinstance(found, tuple) else found
-            local = sum(1 for e in (entries or {}).values()
-                        if isinstance(e, dict) and e.get("command"))
-            agents = _consent_agents(entries)
-        except Exception:                          # noqa: BLE001 - discovery is best-effort here
-            local, agents = 0, []
         if local:
             choice = protect.ask_consent(local, agents)
             if choice is None:
@@ -770,6 +1230,12 @@ def _protect() -> int:
                 choice = protect.REMOTE_ONLY
             else:
                 protect.save_consent(choice)
+        else:
+            # No local servers, so there is nothing to ask about — but the answer must still be
+            # SAID. Leaving it None let a "no consent recorded" value flow into code that only ever
+            # compares against LAUNCH_ALL: it happens to behave like remote-only today, and would
+            # diverge silently the moment anything compared against REMOTE_ONLY instead.
+            choice = protect.REMOTE_ONLY
     if choice == protect.LAUNCH_ALL:
         scan_args.append("--yes")
         # We just asked, with more detail than the scan's own gate gives. Tell it not to ask again.
@@ -816,8 +1282,34 @@ def _protect() -> int:
               "  Run `mcpgawk verify` to do it deliberately. This is not a clean result; it is "
               "no result.\n", file=sys.stderr)
 
-    store = history.load(history.default_path())
-    print(protect.protection_report(store, guard_line, unchecked=[]))
+    store, _store_err = _store_or_say_why()
+    _warn_if_store_unreadable(_store_err)
+    # `unchecked=[]` was hardcoded here — the ONLY production caller — while
+    # protection_report's docstring promises "The 'not checked' block is never omitted and never
+    # summarised into a number". It was omitted on every real run, because nothing ever passed a
+    # value; only tests did. On a REMOTE_ONLY pass every local stdio server is skipped by design
+    # (we refuse to launch their code without consent) and "Protected: N server(s)" printed with
+    # no mention of the ones nobody looked at.
+    _unchecked = ([(n, "not launched — this run checked remote servers only")
+                   for n in sorted(local_servers)]
+                  if choice == protect.REMOTE_ONLY else [])
+    print(protect.protection_report(store, guard_line, unchecked=_unchecked))
+    # ONBOARDING STAGE 5 ([FOUNDER] 2026-08-15: onboarding ends at protect + PANEL, and the
+    # first run offers the bridge): until now the flow finished and the control surface was
+    # never mentioned — a user completed the scan and had no idea a panel existed. TTY only,
+    # a real question (the answer IS the consent), default yes; off a TTY, one honest hint
+    # line and no prompt — a pipe must never hang on input().
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            ans = input("\n  See all of this live — servers, decisions, evidence — in the "
+                        "control panel? [Y/n] ")
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans.strip().lower() in ("", "y", "yes"):
+            from .panel import serve as panel_serve
+            panel_serve(port=7718, open_browser=True)
+    else:
+        print("\n  The control panel shows all of this live: mcpgawk panel")
     return rc
 
 
@@ -901,7 +1393,12 @@ def _front_door_verify(choice: str) -> None:
             try:
                 run_dir = (behaviour_profile_path().parent / "verify-runs"
                            / strftime("%Y-%m-%dT%H-%M-%SZ", gmtime()))
-                run_dir.mkdir(parents=True, exist_ok=True)
+                # secure_dir, not mkdir: this directory holds every reproduction attempt's audit
+                # log. Plain mkdir left it 0755 (28 of them on the founder's machine, measured
+                # 2026-08-13) while `~/.mcpgawk` and `~/.gawk` are both 0700.
+                from .state import secure_dir
+                secure_dir(run_dir.parent)   # mkdir(parents=True) leaves PARENTS at the default mode
+                secure_dir(run_dir)
                 audit_args = ["--audit-log", str(run_dir / "audit.jsonl")]
             except OSError:
                 audit_args = []  # read-only HOME: run without the archive rather than not at all
@@ -950,14 +1447,148 @@ def _front_door_verify(choice: str) -> None:
               "\n  name-only; protection is unaffected.")
 
 
+class _Sighting(NamedTuple):
+    """What recording one measured server produced. Returned so a caller can RENDER what it wrote —
+    a sighting that lands silently is indistinguishable from one that never landed."""
+    key: str
+    previous: dict | None
+    report: Any
+    reidentified_from: str | None
+
+
+def _collisions(snaps) -> set[str]:
+    """The identity keys that more than one recordable server asserts — ONE rule for every
+    recording path. Two config entries asserting the same name would otherwise overwrite each
+    other's history every scan (drift flaps forever); where a scan sees a collision, those entries
+    stay distinct by their config identity (`legacy_key_for`). The sign-in re-probe used to skip
+    this and key by the asserted name alone, so two auth-gated servers sharing a name keyed
+    differently depending on which path measured them (recorded 2026-08-27, fixed 2026-09-03)."""
+    seen: dict[str, int] = {}
+    for sn in snaps:
+        if history.should_record(sn):
+            k = history.key_for(sn)
+            seen[k] = seen.get(k, 0) + 1
+    return {k for k, n in seen.items() if n > 1}
+
+
+def _record_sighting(sn, m, *, now: str, collided=frozenset(),
+                     alias: str | None = None) -> "_Sighting | None":
+    """THE single writer for a measured server. Every path that MEASURES must come through here.
+
+    WHY IT IS A FUNCTION AND NOT A LOOP BODY (found 2026-08-27, on the founder's own machine). The
+    scan had two places that produce a Measurement: the main pass, and the re-probe after a batched
+    sign-in. Only the first recorded. So a server behind OAuth — measured for 22 seconds, 28 tools,
+    19 leak paths, rendered as REVIEW — wrote NOTHING, and the next run reported "no drift" because
+    no comparison had happened. The measurement existed; nobody's job was to persist it.
+
+    Note what did NOT catch it: every invariant in this repo guards a WRITE — `approve`, `record`,
+    and the assignment that moves an approved baseline. A path that never calls the writer is
+    invisible to a write-side gate; you cannot enumerate a missing call by scanning for the call.
+    (Do not spell that assignment literally anywhere in this file: the writer-gate invariant matches
+    raw lines, so quoting its marker in prose reports this function as a baseline writer. It caught
+    exactly that on 2026-08-27 — a false positive, and the safe direction for it to fail in.)
+    Hence its mirror,
+    `tests/test_every_measurement_is_recorded.py`, and hence one recorder rather than two loops.
+
+    Returns None when the probe errored — recording an errored probe would write an empty tool list
+    as the truth.
+    """
+    if not history.should_record(sn):
+        return None
+    # Read-the-baseline and write-the-current under ONE lock (history.record). Split across a
+    # load()/save() pair, two concurrent scans each diff against a baseline the other has already
+    # replaced, and one server's drift history is silently lost.
+    current = drift.build_record(sn, m, measured_at=now)
+    asserted = history.key_for(sn)
+    key = history.legacy_key_for(sn) if asserted in collided else asserted
+    store = history.load()
+    # `migrate_from` carries every key this server could already be recorded under — the legacy
+    # `transport:name` variants (B3), the un-discriminated `mcp:<asserted>` from before the login
+    # joined the identity, and `credential_shed_keys` for the reverse move made on 2026-08-27, when
+    # a machine-attached OAuth token stopped counting as identity. The fix for silent baseline
+    # resets must not itself cause one, in any direction.
+    migrate_keys = tuple(history.legacy_identity_keys(sn)) + history.credential_shed_keys(
+        store, key, sn.name)
+    # C2 — a server that changes the name it ASSERTS gets a new key, and a new key is a first
+    # sighting, which is silence. Check before recording, or the entry we would be comparing
+    # against is the one we just created.
+    was = history.identity_change(store, key, sn.name)
+    if was in migrate_keys:
+        # OUR key scheme changed, the server did not. `record` adopts that exact record below, so
+        # the baseline DOES carry over — announcing "identifies itself as a DIFFERENT server … its
+        # baseline does not carry over" would be a false alarm that fires once for every
+        # credentialled server on upgrade, and it would be untrue.
+        was = None
+    # `alias` names the record for an AD-HOC target (`_adhoc_name`); a config scan's label IS
+    # the config name, so the default stands there.
+    previous = history.record(key, current, migrate_from=migrate_keys, alias=alias or sn.name)
+    return _Sighting(key=key, previous=previous,
+                     report=drift.compare(previous, current), reidentified_from=was)
+
+
+def with_stored_login(entry: dict) -> dict:
+    """The same entry, carrying the bearer token this machine already holds for it.
+
+    Module-level and named so it can be tested against the shape a config actually produces. It
+    was previously a closure that did not exist at all: `as_authenticated_remote` was written and
+    unit-tested and called by NOTHING, so a completed sign-in stored a token no scan ever read.
+
+    A local server is returned untouched — there is nothing to attach and nothing to leak.
+    """
+    try:
+        from . import credentials as _credentials
+        from . import remote_login as _rl
+        if entry.get("command") and not _rl.wrapped_remote_url(entry):
+            return entry
+        cfg = _rl.as_authenticated_remote(entry)
+        if not cfg:
+            return entry
+        merged = dict(entry)
+        merged.update(cfg)
+        merged["headers"] = {**(entry.get("headers") or {}), **cfg["headers"]}
+        # A STRING marker, not the provider object: entries are copied and compared. The probe
+        # builds the refresh-only provider from it, so an expired access token is refreshed
+        # with the stored refresh token instead of being sent stale (notion, 2026-09-03).
+        merged["_refreshable_login"] = cfg["url"]
+        # The attached token must NOT become part of this server's identity. The store key carries
+        # `credentials.fingerprint`, which hashes `headers` — so without this line an OAuth refresh
+        # re-keys the server, and a re-keyed server is a first sighting, which is silence. Measured
+        # on notion 2026-08-27: dc5a20f0a98b -> 479090bf5998 across one refresh. Pin what the CONFIG
+        # declares; a token this machine fetched for itself says nothing about which account the
+        # config points at.
+        merged[_credentials.IDENTITY_AS_DECLARED] = _credentials.material(entry)
+        # WHICH sign-in this token came from. Deliberately NOT part of the identity the key is
+        # built from — see ServerSnapshot.login_id — but recorded, so a scan taken through a
+        # DIFFERENT sign-in than the approved baseline says so instead of silently reusing it.
+        from .probe import LOGIN_ID_KEY as _lid
+        merged[_lid] = _rl.stored_login_id(cfg["url"])
+        return merged
+    except Exception:                              # noqa: BLE001 — a scan must survive this
+        return entry
+
+
 def _scan_target(raw: list[str]) -> str | None:
     """What this scan was pointed at, for the run log's `target` column. A fleet scan (no explicit
     transport flag) legitimately has no single target and records None rather than inventing one."""
-    for flag in ("--stdio", "--http", "--sse"):
+    for flag in ("--stdio", "--http", "--sse", "--only"):
         if flag in raw:
             i = raw.index(flag)
             if i + 1 < len(raw):
                 return f"{flag.lstrip('-')}:{raw[i + 1]}"
+    # A config path is a target too: `scan nc.json` is not a fleet-wide scan of this machine.
+    # (`--only kite` was recorded as "fleet-wide" on the Evidence page, 2026-09-03.)
+    _takes_value = {"--header", "--only", "--oauth-client-id", "--oauth-client-secret-env",
+                    "--oauth-redirect-uri", "--stdio", "--http", "--sse", "--timeout"}
+    skip = False
+    for a in raw[1:]:
+        if skip:
+            skip = False
+            continue
+        if a in _takes_value:
+            skip = True                       # a --header value can contain `/` — never a target
+            continue
+        if not a.startswith("-") and (a.endswith(".json") or a.endswith(".toml") or "/" in a):
+            return f"config:{a}"
     return None
 
 
@@ -975,11 +1606,54 @@ def main(argv: list[str] | None = None) -> int:
     # is how a bare `mcpgawk` came to look like it hung in total silence while it had in fact
     # printed the banner and the entire scan table: 3376 bytes, sitting in an 8 KiB buffer that
     # was never flushed. Work done but not shown is indistinguishable from work not done.
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-    except (AttributeError, ValueError):  # a replaced/detached stdout (tests, embedding)
-        pass
+    # `reconfigure` is TextIOWrapper-only: a replaced or detached stdout (tests, embedding) may not
+    # have it at all. Asked for by name rather than caught after the fact, so the absence is a
+    # branch the reader and the type checker can both see.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        try:
+            reconfigure(line_buffering=True)
+        except ValueError:                # a detached buffer — nothing to line-buffer
+            pass
 
+    # The MCP SDK logs child-cleanup warnings WITH exc_info (terminate_posix_process_tree's
+    # killpg can hit EPERM on macOS process groups), and this CLI configures no handlers, so
+    # Python's last-resort handler printed the full traceback into the founder's first-run
+    # banner — twice, 2026-08-15. The one-line fact stays ("No permission to signal …; waiting
+    # for it to exit anyway" is honest and complete); the stack frames are for us, not the
+    # operator's terminal. Filter on the handler, not the logger: the record is emitted by a
+    # CHILD logger and propagated records skip ancestor loggers' filters.
+    import logging as _logging
+    if _logging.lastResort is not None and not any(
+            type(f).__name__ == "_SdkCleanupNoise" for f in _logging.lastResort.filters):
+        class _SdkCleanupNoise(_logging.Filter):
+            def filter(self, record: _logging.LogRecord) -> bool:
+                if record.name.startswith("mcp"):
+                    record.exc_info = None
+                    record.exc_text = None
+                return True
+        _logging.lastResort.addFilter(_SdkCleanupNoise())
+
+    try:
+        try:
+            return _main_body(argv)
+        finally:
+            # Flush INSIDE the guard: the broken pipe usually surfaces at the final flush, which
+            # otherwise happens at interpreter exit where nothing can catch it. This also runs
+            # for argparse's SystemExit (`--version`, `--help`), the two commands most piped.
+            sys.stdout.flush()
+    except BrokenPipeError:
+        # `mcpgawk --version | head -1` closed the pipe after one line; the second line raised
+        # here and the interpreter's exit flush raised AGAIN as "Exception ignored … Broken pipe".
+        # A closed reader is the reader's business: point stdout at nowhere and leave quietly.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        return 0
+
+
+def _main_body(argv: list[str] | None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if not raw or raw[0] != "scan":
         code = _dispatch(argv)
@@ -990,15 +1664,32 @@ def main(argv: list[str] | None = None) -> int:
     # read as "in progress" today.
     runlog.reconcile_stale()
     run_id = runlog.start_run("scan", _scan_target(raw))
+    # WHO RAN THIS. Twenty `scan` runs exiting via SystemExit in two days sat in the founder's
+    # real registry with no way to tell a person's `scan --help` from a process spawning the
+    # binary (2026-09-03). The parent pid and the first argv tokens (redacted, values of
+    # value-taking flags never included) answer that from the record itself.
+    from .redact import redact as _redact
+    _who = {"ppid": os.getppid(),
+            "argv": _redact(" ".join(a for a in raw[:4] if not a.startswith("http"))) or ""}
     try:
         code = _dispatch(argv)
+    except SystemExit as exc:
+        # `scan --help` / an argparse refusal exit through here. Code 0 is not an error — it was
+        # recorded as `error · SystemExit: 0` on the Evidence page (2026-09-03) — and a usage
+        # error is the caller's, not the tool's.
+        _code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 2)
+        runlog.finish_run(run_id, runlog.OK if _code == 0 else runlog.INCOMPLETE,
+                          {"exit_code": _code, "usage": _code != 0, **_who})
+        raise
     except BaseException as exc:                       # noqa: BLE001 - recorded, then re-raised
-        runlog.finish_run(run_id, runlog.ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+        runlog.finish_run(run_id, runlog.ERROR,
+                          {"error": f"{type(exc).__name__}: {exc}", **_who})
         raise
     # Non-zero here means the scan RAN and something wants attention (findings, a caveat, drift) —
     # a crash would have raised. Calling that `error` would make every drift detection look like a
     # tool failure in the timeline.
-    runlog.finish_run(run_id, runlog.FINDINGS if code else runlog.OK, {"exit_code": code})
+    runlog.finish_run(run_id, runlog.FINDINGS if code else runlog.OK,
+                      {"exit_code": code, **_who})
     _staleness_advisory()
     return code
 
@@ -1015,6 +1706,31 @@ def _staleness_advisory() -> None:
             print(line, file=sys.stderr)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _scan_failed(labels: list, drift_reports: dict, reidentified: dict) -> bool:
+    """The scan's exit-code decision — one answer for --json, --fleet-json and the terminal view.
+
+    A CI gate reads this exit code, so the decision was under test only by a source grep for a
+    substring of this file, which passes even when the logic is deleted. Extracted so a test can
+    DRIVE it with real labels.
+
+    Exit non-zero on any of: a live (un-muted) bounded_signal on any server — the injection-finding
+    case that used to exit 0 and pass every gate built on it; a probe caveat; drift; or a
+    re-identified server (which produces no DriftReport — "nothing to compare" is not "nothing
+    wrong", the exact evasion a renamed server uses). A finding the user explicitly MUTED is
+    excluded: that is their decision, not ours."""
+    def _live(lab: dict) -> bool:
+        # config:* findings are deliberately excluded from the exit decision: unpinned is the
+        # ecosystem's README default, so failing CI on it would train people onto --no-signals —
+        # which silences the injection findings this exit exists for (configcheck.py's contract).
+        return any(not s.get("muted")
+                   for s in (lab["x-mcpgawk"].get("bounded_signals") or [])
+                   if not (s.get("kind") or "").startswith("config:"))
+
+    return (any(lab["x-mcpgawk"].get("caveats") for lab in labels)
+            or any(_live(lab) for lab in labels)
+            or bool(drift_reports) or bool(reidentified))
 
 
 def _dispatch(argv: list[str] | None = None) -> int:
@@ -1066,9 +1782,22 @@ def _dispatch(argv: list[str] | None = None) -> int:
         return serve(port=args.port, open_browser=not args.no_open)
 
     if args.cmd == "status":
-        from .status import collect_and_render
-        print(collect_and_render())
+        from .status import collect, collect_and_render, to_json
+        if getattr(args, "json", False):
+            import json as _json
+            print(_json.dumps(to_json(collect()), indent=2, sort_keys=True))
+        else:
+            print(collect_and_render())
         return 0
+
+    if args.cmd == "checkup":
+        from .checkup import run as _checkup
+        return _checkup(output=args.output, note=args.note, assume_yes=args.yes,
+                        strict=args.strict)
+
+    if args.cmd == "report":
+        from .report import run as _report
+        return _report(output=args.output, note=args.note, strict=args.strict)
 
     if args.cmd == "runs":
         return _runs(args)
@@ -1093,7 +1822,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
 
     # No args at all is VALID: it means "discover and scan everything on this machine". _run handles
     # the nothing-found message and default-deny consent before launching any discovered stdio server.
-    snaps, entries, skipped = asyncio.run(_run(args))
+    try:
+        snaps, entries, skipped = asyncio.run(_run(args))
+    except _NoMatchingServers:
+        return 2        # a typo at --only, already explained on stderr; not a tool failure
     measurements = [measure(sn) for sn in snaps]
     # Cross-server signals need all snapshots together; merge into each involved server's signals.
     # Two DISTINCT techniques, both requiring the whole inventory:
@@ -1121,7 +1853,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
                 _url = str((entries.get(_sn.name) or {}).get("url") or "")
                 if _url:
                     _needs[_sn.name] = _url
-        _rl.record_auth_needed(_needs)
+        # Bound the clearing to what this run actually probed. A one-URL scan must not speak for
+        # servers it never looked at.
+        _rl.record_auth_needed(_needs, scanned={_sn.name for _sn in snaps})
     except Exception:                               # noqa: BLE001 — bookkeeping never costs a scan
         pass
 
@@ -1134,48 +1868,34 @@ def _dispatch(argv: list[str] | None = None) -> int:
 
     # --track: record locally and diff against the last sighting (rug-pull detection).
     drift_reports: dict[str, drift.DriftReport] = {}
+    pin_notes: dict[str, str] = {}          # servers whose pin this build cannot compare
     new_baselines: list[str] = []
     reidentified: dict[str, str] = {}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if args.track:
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         # Keying on the server's asserted identity (so a rename can't orphan a baseline) means two
         # config entries for the SAME server collapse onto one key. Left alone they overwrite each
         # other's history every scan and drift flaps forever — and a false alarm that fires every
         # run trains the user to ignore the one signal that matters. Where a scan sees a collision,
         # keep those entries distinct by their config identity instead.
-        recordable = [sn for sn in snaps if history.should_record(sn)]
-        seen: dict[str, int] = {}
-        for sn in recordable:
-            seen[history.key_for(sn)] = seen.get(history.key_for(sn), 0) + 1
-        collided = {k for k, n in seen.items() if n > 1}
+        collided = _collisions(snaps)
         for sn, m in zip(snaps, measurements):
-            if not history.should_record(sn):
+            seen_now = _record_sighting(sn, m, now=now, collided=collided,
+                                        alias=_adhoc_name(sn.name, entries.get(sn.name)))
+            if seen_now is None:
                 continue          # an errored probe would record an empty tool list as the truth
-            # Read-the-baseline and write-the-current under ONE lock (history.record). Split across
-            # a load()/save() pair, two concurrent scans each diff against a baseline the other has
-            # already replaced, and one server's drift history is silently lost.
-            #
-            # `migrate_from` carries every legacy `transport:name` key (B3), so both switching to the
-            # server-asserted identity AND switching transport on a nameless server adopt an existing
-            # baseline instead of orphaning it — the fix for silent baseline resets must not itself
-            # cause one, in either direction.
-            current = drift.build_record(sn, m, measured_at=now)
-            asserted = history.key_for(sn)
-            key = history.legacy_key_for(sn) if asserted in collided else asserted
-            # C2 — a server that changes the name it ASSERTS gets a new key, and a new key is a
-            # first sighting, which is silence. Check before recording, or the entry we would be
-            # comparing against is the one we just created.
-            was = history.identity_change(history.load(), key, sn.name)
-            if was:
-                reidentified[sn.name] = was
-            previous = history.record(key, current,
-                                      migrate_from=history.transport_variant_keys(sn),
-                                      alias=sn.name)
-            if previous is None:
+            if seen_now.reidentified_from:
+                reidentified[sn.name] = seen_now.reidentified_from
+            if seen_now.previous is None:
                 new_baselines.append(sn.name)
-            rep = drift.compare(previous, current)
-            if rep and rep.any:
-                drift_reports[sn.name] = rep
+            if seen_now.report and seen_now.report.any:
+                drift_reports[sn.name] = seen_now.report
+            if seen_now.report and seen_now.report.pin_not_compared:
+                # Kept OUTSIDE drift_reports on purpose: a pin that could not be compared is not
+                # drift, and putting it there would restore the false alarm being removed. But it
+                # must not vanish either — `no change since your baseline` would then cover a run
+                # that skipped the exact anchor, which is this product's failure mode.
+                pin_notes[sn.name] = seen_now.report.pin_not_compared
 
     # Drift must reach the MACHINE-READABLE output and the exit code, not only the pretty print.
     # A rug-pull that a CI job can't see is a rug-pull that ships: `--json` consumers and pipeline
@@ -1186,19 +1906,26 @@ def _dispatch(argv: list[str] | None = None) -> int:
             d = asdict(rep)
             d["rug_pull"] = bool(rep.changed)   # same item, rewritten description — the signature
             d["hostile"] = rep.hostile          # injection signature or capability escalation
+            # A refused baseline has EMPTY diff lists, so `rug_pull`/`hostile` both read false —
+            # calm, for a server nothing was compared against. A CI gate keying on those fields
+            # would pass while the exit code says otherwise. Say plainly that no comparison
+            # happened, so a consumer can distinguish "checked, clean" from "not checked".
+            d["compared"] = rep.unreadable is None
             lab["x-mcpgawk"]["drift"] = d
+        if lab["name"] in pin_notes:
+            # The terminal says "nothing itemised changed, but <the pin was not checked>"; the
+            # document must say it too, or a CI consumer of --json reads a clean server with no
+            # sign that the exact anchor was skipped this run.
+            lab["x-mcpgawk"]["pin_not_compared"] = pin_notes[lab["name"]]
         if lab["name"] in reidentified:
             # No DriftReport exists for a re-identification, so a JSON consumer would see nothing
             # at all — the same blindness the exit code had.
             lab["x-mcpgawk"]["reidentified_from"] = reidentified[lab["name"]]
 
-    # ONE exit code for both output modes. `--json` used to `return 0` unconditionally — so a failed
-    # probe or a detected rug-pull reported success to CI, the same class of lie as a false CLEAN.
-    # A re-identification must fail too. It produces no DriftReport — there is nothing to diff
-    # against — so without this a server that renames itself passes CI silently, which is exactly
-    # the evasion C2 exists to close. "Nothing to compare" is not "nothing wrong".
-    failed = (any(lab["x-mcpgawk"].get("caveats") for lab in labels)
-              or bool(drift_reports) or bool(reidentified))
+    # ONE exit code for both output modes (see _scan_failed). `--json` used to `return 0`
+    # unconditionally — so a failed probe or a detected rug-pull reported success to CI, the same
+    # class of lie as a false CLEAN.
+    failed = _scan_failed(labels, drift_reports, reidentified)
 
     if args.json:
         print(json.dumps(labels, indent=2))
@@ -1206,7 +1933,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
 
     if getattr(args, "fleet_json", False):
         # Front-ends get the SAME rows the terminal view renders — never raw labels to re-interpret.
-        unscannable = detect_unscannable() if not (args.stdio or args.http or args.sse) else []
+        unscannable = (detect_unscannable(exclude=_known_names(entries, skipped))
+                       if not (args.stdio or args.http or args.sse or args.only) else [])
         payload = fleet.to_json(fleet.build_rows(labels, entries, skipped, unscannable,
                                                  with_spec=getattr(args, "with_spec", False)))
         print(json.dumps(payload, indent=2))
@@ -1225,8 +1953,11 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # narrative stays a deliberate `--detail` (or --only <name>) away. One server always renders in
     # full: there is nothing to summarise.
     # Capabilities that exist but no local scan can reach (account-hosted connectors, browser
-    # hosts) are LISTED, never silently omitted — see discover.detect_unscannable.
-    unscannable = detect_unscannable() if not (args.stdio or args.http or args.sse) else []
+    # hosts) are LISTED, never silently omitted — see discover.detect_unscannable. Not under
+    # `--only`: the caller named the server they mean, and five "beyond this machine" rows under
+    # a one-server answer is noise ("--only kite" printed six rows, 2026-09-03).
+    unscannable = (detect_unscannable(exclude=_known_names(entries, skipped))
+                   if not (args.stdio or args.http or args.sse or args.only) else [])
     rows = fleet.build_rows(labels, entries, skipped, unscannable)
     if len(rows) > 1 and not args.detail:
         # DRIFT LEADS. It used to print after the fleet list, so the one finding a general-purpose
@@ -1245,7 +1976,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
         if drift_reports:
             print()
             hostile = sorted(n for n, r in drift_reports.items() if r.hostile)
-            print(drift.render_headline(sorted(drift_reports), hostile))
+            print(drift.render_headline(
+                sorted(drift_reports), hostile,
+                injected=sorted(n for n, r in drift_reports.items() if r.injected),
+                escalated=sorted(n for n, r in drift_reports.items() if r.escalated)))
             for name in sorted(drift_reports):
                 print(drift.render(name, drift_reports[name]))
         print()
@@ -1260,7 +1994,10 @@ def _dispatch(argv: list[str] | None = None) -> int:
             print("    From now on a scan reports what CHANGED — the one thing looking at your "
                   "machine today can never tell you.")
         print()
-        refreshed = _offer_batched_auth(rows, args, entries)
+        late: dict[str, _Sighting] = {}
+        refreshed = _offer_batched_auth(rows, args, entries, sightings=late,
+                                        now=now if args.track else None,
+                                        fleet_snaps=snaps)
         any_error = any(lab["x-mcpgawk"].get("caveats") for lab in labels)
         if refreshed:
             # Redraw with the signed-in servers now MEASURED, rather than sending the user back to
@@ -1270,10 +2007,32 @@ def _dispatch(argv: list[str] | None = None) -> int:
             print("\n  Updated:\n")
             print(fleet.render_fleet(fleet.sort_rows(rows)))
             print()
+            # WHAT WAS WRITTEN, SAID OUT LOUD. The drift headline is printed before the sign-in
+            # step, so anything learned here would otherwise land in the store and never reach the
+            # screen — recorded silently, which reads exactly like not recorded at all. A
+            # re-identification gets the same ⛔ the main pass gives it: C2 must not be blind on
+            # this path just because the measurement arrived late.
+            for name in sorted(late):
+                seen_now = late[name]
+                if seen_now.reidentified_from:
+                    print(f"  ⛔ {name} now identifies itself as a DIFFERENT server "
+                          f"(was {seen_now.reidentified_from}). Its baseline does not carry over — "
+                          f"treat it as unreviewed.")
+                elif seen_now.previous is None:
+                    print(f"  ✓ Baseline recorded for {name} — from now on a scan reports what "
+                          f"CHANGED.")
+                elif seen_now.report and seen_now.report.any:
+                    print(drift.render(name, seen_now.report))
+            if late:
+                print()
             # A server that only became measurable after sign-in can carry findings — those must
-            # count towards the exit code exactly as if the first pass had seen them.
-            any_error = any_error or any(r.state in ("REVIEW", "INCOMPLETE", "UNREACHABLE")
+            # count towards the exit code exactly as if the first pass had seen them. Drift and
+            # re-identification learned here count too, for the same reason.
+            any_error = any_error or any(r.state in ("REVIEW", "INCOMPLETE", "UNREACHABLE",
+                                                     "FAILED", "TIMED-OUT")
                                          for r in refreshed.values())
+            any_error = any_error or any(s.reidentified_from or (s.report and s.report.any)
+                                         for s in late.values())
         _behavioural_capability_note()
         return 1 if (any_error or failed) else 0
 
@@ -1310,12 +2069,45 @@ def _dispatch(argv: list[str] | None = None) -> int:
             print("\n" + render_cli(lab, verbose=False))   # a failure is never summarised away
         else:
             n = lab["x-mcpgawk"]["tool_count"]
-            muted_n = sum(1 for s in (lab["x-mcpgawk"].get("bounded_signals") or [])
-                          if s.get("muted"))
-            muted_note = f", {muted_n} finding{'s' if muted_n != 1 else ''} muted by you" \
-                if muted_n else ""
-            print(f"\n  ✓ {name}: no change since your baseline "
-                  f"({n} tool{'s' if n != 1 else ''}{muted_note} — full surface: --full).")
+            signals = lab["x-mcpgawk"].get("bounded_signals") or []
+            live = [s for s in signals if not s.get("muted")]
+            muted_n = sum(1 for s in signals if s.get("muted"))
+            if live:
+                # UNCHANGED IS NOT CLEAN. This branch printed a lone green tick for any tracked
+                # server with no drift and no probe error — and `caveats` covers probe/scan
+                # failures only, never findings. So a server whose description was ALREADY
+                # poisoned when you approved it, and has sat unchanged since, rendered as
+                # "✓ no change since your baseline" with the findings printed nowhere: render_cli
+                # is skipped on this path and render_summary is skipped too (it is gated on
+                # any_error). The old line even named findings you had MUTED while omitting the
+                # live ones, which is the asymmetry that gives the game away.
+                any_error = True
+                print(f"\n  ⚠ {name}: no change since your baseline, but it was never clean — "
+                      f"{len(live)} live finding{'s' if len(live) != 1 else ''} still "
+                      f"{'stand' if len(live) != 1 else 'stands'}:")
+                print("\n" + render_cli(lab, verbose=False))
+            else:
+                muted_note = f", {muted_n} finding{'s' if muted_n != 1 else ''} muted by you" \
+                    if muted_n else ""
+                if name in pin_notes:
+                    # NOT a clean tick: the comparison ran without its exact anchor.
+                    print(f"\n  ⚠ {name}: nothing itemised changed "
+                          f"({n} tool{'s' if n != 1 else ''}{muted_note}), but {pin_notes[name]}")
+                else:
+                    print(f"\n  ✓ {name}: no change since your baseline "
+                          f"({n} tool{'s' if n != 1 else ''}{muted_note} — full surface: --full).")
+    # A ROW WITHOUT A LABEL STILL RENDERS. The narrative above walks `labels`, and a server we
+    # declined to launch (or a capability no local scan can reach) has no label — it only has a
+    # fleet row. The fleet view renders those rows, but this path is taken whenever there is at
+    # most one row, or `--detail` was asked for, and here they were printed NOWHERE: with an empty
+    # HOME and one dangling entry, `mcpgawk scan nc.json` named the server in the consent banner
+    # and then reported nothing at all (reproduced 2026-09-03). One row saying "its program no
+    # longer exists — anything at that path would run" is the whole result of that scan, and the
+    # user saw a blank. Same class as skipped_row's own reason for existing: an unscanned server
+    # that vanishes from the report lets the summary imply coverage it does not have.
+    unlabelled = [r for r in rows if r.name not in {lab["name"] for lab in labels}]
+    if unlabelled:
+        print("\n" + fleet.render_fleet(unlabelled))
     # Local (stdio) servers — launched this run or merely configured. Both inherit the same
     # ambient credentials the moment anything starts them, so both count towards that warning.
     local_servers = (sum(1 for e in entries.values() if e.get("command"))
@@ -1327,7 +2119,11 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # Scanning is not protection. A report with no next step is how the author finished a scan on
     # his own machine and stayed unprotected — the hook existed, worked, and was never installed
     # because nothing ever mentioned it. Only shown when it is actually actionable.
-    if not _guard_is_installed():
+    _installed = _guard_is_installed()
+    if _installed is None:
+        print("  Whether your agents are checking these servers could not be determined — the "
+              "guard probe failed. Run `mcpgawk guard status`.\n")
+    elif not _installed:
         print("  Your agents are not checking these servers yet. `mcpgawk` turns that on.\n")
     _behavioural_capability_note()
     return 1 if (any_error or failed) else 0
@@ -1359,16 +2155,67 @@ def _mark_muted_findings(labels: list[dict]) -> None:
                 s["muted"] = True
 
 
-def _guard_is_installed() -> bool:
-    """Best-effort: never let a status probe break a completed scan."""
+def _guard_is_installed() -> "bool | None":
+    """Is the runtime guard installed? True / False / None when the probe itself failed.
+
+    Was `return True` on exception, "to stay quiet rather than nag wrongly" — which meant a broken
+    probe silenced "Your agents are not checking these servers yet." on exactly the machines most
+    likely to need it. Silence there is indistinguishable from coverage, and this is the last line
+    of a scan: the one a user reads to decide whether they are done.
+
+    Still never raises — an advisory probe must not fail a completed scan — but "I could not tell"
+    is now its own answer, and the caller says so instead of picking the reassuring one.
+    """
     try:
         from .guard import status
         return "NOT installed" not in status()
     except Exception:                              # noqa: BLE001 - advisory only
-        return True                                # stay quiet rather than nag wrongly
+        return None
 
 
-def _offer_batched_auth(rows: list, args, entries: dict) -> dict:
+_CIRCULAR_LOGIN_ADVICE = 'retry with `--login` or `--header "Authorization: Bearer …"`'
+
+
+def _honest_login_error(url: str, snap_error: str, flow_error: str | None) -> str:
+    """The single-URL `--login` flow's failure text: the probe's own ladder with the circular
+    "retry with `--login`" clause replaced, plus — for a Dynamic Client Registration refusal —
+    the one line that names the way through (`--oauth-client-id`). Pinned by
+    tests/test_remote_oauth_login.py against figma's real refusal output."""
+    from urllib.parse import urlsplit
+    head = snap_error.replace(_CIRCULAR_LOGIN_ADVICE, "`--login` ran and did not complete").rstrip()
+    line = _signin_failure_line(urlsplit(url).netloc or url, snap_error, flow_error)
+    if "refuses automatic client registration" in line:
+        return head + "\n" + line
+    return head
+
+
+def _signin_failure_line(name: str, snap_error: str, flow_error: str | None) -> str:
+    """One honest line for a sign-in that died — never a traceback, never circular advice.
+
+    Both failures shipped to the founder's terminal on figma (2026-08-14): the SDK's raw
+    'OAuth flow error' traceback, then our own scan-path message telling them to "retry with
+    `--login`" — from INSIDE the login flow that had just failed. A server that refuses Dynamic
+    Client Registration (403 on the registration endpoint) is a dead end for this flow, and the
+    honest answer names that instead of sending the user in a circle."""
+    err = " ".join((flow_error or snap_error or "no detail").split())
+    if "Registration failed" in err:
+        # This class is no longer a dead end: BYO-client shipped 2026-08-15 — but the founder's
+        # very next scan still read "check figma's documentation", because this message predated
+        # the feature and nothing tied the two together. The refusal now names our own way
+        # through it.
+        return (f"  {name}: this server refuses automatic client registration ({err[:120]}) — "
+                f"it only accepts OAuth clients it already knows about. The way through: create "
+                f"an OAuth app in {name}'s developer console, register the redirect URI mcpgawk "
+                f"prints, then run once:  mcpgawk scan --login <url> --oauth-client-id <id> "
+                f"[--oauth-client-secret-env VAR]")
+    # Scan-path advice is circular inside the login flow itself: we ARE `--login`.
+    err = err.split("; retry with")[0]
+    return f"  {name}: sign-in did not complete — {err[:160]}"
+
+
+def _offer_batched_auth(rows: list, args, entries: dict, *,
+                        sightings: dict | None = None, now: str | None = None,
+                        fleet_snaps=()) -> dict:
     """ONE prompt for every server that needs credentials — never one prompt per server, which the
     founder rejected outright as the painpoint this view exists to remove.
 
@@ -1379,9 +2226,14 @@ def _offer_batched_auth(rows: list, args, entries: dict) -> dict:
     pending = [r for r in rows if r.needs_auth]
     if not pending:
         return {}
-    if not sys.stdin.isatty():
-        print(f"  {len(pending)} server(s) need credentials. Re-run in a terminal, or: "
-              f"mcpgawk scan --http <url> --login\n", file=sys.stderr)
+    # --yes means non-interactive: proceed without asking. OAuth sign-in cannot be automated, so
+    # "assume yes" here can only mean "do not block on the prompt". This check was missing, gated
+    # solely on isatty — so `scan --yes` (what `checkup` runs, with stdout/stderr captured and
+    # stdin inherited from the tester's terminal) reached input() and DEADLOCKED behind captured
+    # output until the 900s timeout, which the walk then recorded as a false "slow scan".
+    if getattr(args, "yes", False) or not sys.stdin.isatty():
+        print(f"  {len(pending)} server(s) need credentials. Re-run in a terminal without --yes, "
+              f"or: mcpgawk scan --http <url> --login\n", file=sys.stderr)
         return {}
 
     print("  These need credentials:")
@@ -1396,6 +2248,10 @@ def _offer_batched_auth(rows: list, args, entries: dict) -> dict:
 
     from .oauth_login import build_login_provider
     refreshed: dict[str, FleetRow] = {}
+    # TWO PHASES: measure every chosen server first, record second. Collisions are a property of
+    # the WHOLE fleet — the main pass's servers plus everything signed in here — and the key a
+    # sighting lands on must not depend on the order the operator signed in.
+    measured: list[tuple] = []
     for i in picked:
         row = pending[i]
         print(f"\n  Signing in to {row.name} — approve in the browser…", file=sys.stderr)
@@ -1406,16 +2262,34 @@ def _offer_batched_auth(rows: list, args, entries: dict) -> dict:
         finally:
             server.shutdown()               # always release the local callback port
         if snap.is_failure:
-            print(f"  {row.name}: sign-in did not complete — {(snap.error or '')[:90]}", file=sys.stderr)
+            from .oauth_login import last_flow_error
+            print(_signin_failure_line(row.name, snap.error or "", last_flow_error()),
+                  file=sys.stderr)
             continue
+        measured.append((row, snap))
+    collided = _collisions(list(fleet_snaps) + [snap for _, snap in measured])
+    for row, snap in measured:
         # The row is replaced by a REAL measurement of the now-authenticated server, built through
         # the same label path as the original pass — so the refreshed row cannot disagree with the
         # one it replaces, and a server that turns out to be risky says so immediately.
         entry = entries.get(row.name) or {}
-        label = _label_for(snap, measure(snap), entry, args)
+        m = measure(snap)
+        # RECORD IT. This is the only pass that ever measures an auth-gated server, and until
+        # 2026-08-27 it was the one pass that wrote nothing — so such a server could never
+        # accumulate history, and every later scan reported "no drift" because no comparison had
+        # ever been made. Same recorder as the main pass, SAME collision rule, so the sighting
+        # cannot disagree with one.
+        # `--no-track` means "measure but write nothing", and it must mean that HERE too — a flag
+        # honoured by one of two recording paths is not honoured.
+        if getattr(args, "track", False):
+            seen_now = _record_sighting(snap, m, now=now or datetime.now(timezone.utc).isoformat(
+                timespec="seconds"), collided=collided)
+            if sightings is not None and seen_now is not None:
+                sightings[row.name] = seen_now
+        label = _label_for(snap, m, entry, args)
         state, detail = fleet.state_of(label)
         refreshed[row.name] = FleetRow(name=row.name, state=state, detail=detail, url=row.url,
-                                       clients=row.clients)
+                                       clients=row.clients, names=row.names)
         print(f"  {row.name}: signed in — {detail}", file=sys.stderr)
     return refreshed
 

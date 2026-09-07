@@ -31,8 +31,12 @@ from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
+from .credentials import fingerprint as credential_fingerprint
 from .servercard import fetch_card
 from .transport import Candidate as _Candidate
+
+#: Where `cli.with_stored_login` parks the sign-in mark on the entry it hands to a probe.
+LOGIN_ID_KEY = "_login_id"
 
 #: Servers colour their output; a colour code inside an error message is noise, not information.
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -64,6 +68,20 @@ class ServerSnapshot:
     # was declared (see transport.py). None means "the declaration was right" — the common case.
     resolved_url: str | None = None
     declared_transport: str | None = None
+    # WHICH LOGIN this entry uses, as a digest (see credentials.py) — None when it carries none.
+    # Carried on the SNAPSHOT rather than passed to `history.key_for` as an argument, deliberately:
+    # an optional argument is a rule that every call site has to remember, and a call site that
+    # forgets it silently reverts to conflating two accounts as one server. A field is correct by
+    # construction everywhere, and a snapshot built without one (a CLI --stdio scan, a test) keeps
+    # exactly the old identity.
+    credential_fingerprint: str | None = None
+    #: WHICH SIGN-IN this measurement was taken through, when it went through a stored OAuth login.
+    #: Not an account name — no MCP token on this machine is a JWT or carries an `id_token`, so
+    #: there is no issuer or subject to read (measured 2026-09-02). It is our own mark for one
+    #: completed browser flow, stable across every refresh of that flow's tokens, so a LATER
+    #: sign-in is distinguishable from a refresh. Never part of the store key: re-keying on a
+    #: re-login would make it a first sighting, which is silence.
+    login_id: str | None = None
 
     @property
     def transport_corrected(self) -> bool:
@@ -94,14 +112,33 @@ def _dump(items: list[Any]) -> list[dict[str, Any]]:
 
 
 async def _snapshot(session: ClientSession, name: str, transport: str) -> ServerSnapshot:
-    init = await session.initialize()
+    # LEGACY FIRST, modern as the fallback — deliberately, and the order matters twice over.
+    # The 2026-07-28 revision replaces `initialize` with a stateless `server/discover`, and the
+    # spec is backward-incompatible BOTH ways: a post-upgrade server may refuse `initialize`
+    # outright (measured 2026-08-13 — before this change such a server scanned as "unreachable",
+    # the exact wrong answer during the upgrade wave). But `server/discover` returns NO serverInfo,
+    # and server IDENTITY — the history key every baseline hangs off — comes from serverInfo. A
+    # discover-first policy silently changed the identity of every dual-mode SDK server and broke
+    # cross-scan continuity (caught by the suite, not by reasoning). So: the legacy handshake wins
+    # whenever the server still speaks it; `discover` is the door for servers that no longer do.
+    protocol_version: str | None
+    server_info: dict[str, Any]
+    try:
+        init = await session.initialize()
+        # SDK v2 renamed the model attrs to snake_case; by_alias keeps the STORED shape on the
+        # wire form (camelCase) so existing baselines and fingerprints do not all drift at once.
+        protocol_version = init.protocol_version
+        server_info = (init.server_info.model_dump(by_alias=True, mode="json")
+                       if init.server_info else {})
+    except Exception:             # noqa: BLE001 - "refused initialize" is the modern signature
+        disc = await session.discover()
+        protocol_version = (disc.supported_versions[0] if disc.supported_versions else None)
+        server_info = {}          # server/discover carries capabilities, not serverInfo
     snap = ServerSnapshot(
         name=name,
         transport=transport,
-        # SDK v2 renamed the model attrs to snake_case; by_alias keeps the STORED shape on the
-        # wire form (camelCase) so existing baselines and fingerprints do not all drift at once.
-        protocol_version=init.protocol_version,
-        server_info=(init.server_info.model_dump(by_alias=True, mode="json") if init.server_info else {}),
+        protocol_version=protocol_version,
+        server_info=server_info,
     )
     # tools/list is the load-bearing surface; prompts/resources are optional per server.
     snap.tools = _dump((await session.list_tools()).tools)
@@ -144,36 +181,125 @@ def _unwrap(exc: BaseException) -> BaseException:
     return exc
 
 
-async def _bounded(coro_factory, name: str, transport: str, timeout: float) -> ServerSnapshot:
+def _status_recorder() -> tuple[dict[str, int | None], Any]:
+    """A response hook that remembers the last HTTP status the transport actually saw.
+
+    Needed because the streamable-HTTP client converts a refused handshake into
+    `MCPError("Server returned an error response")` — a JSON-RPC-shaped error carrying no status,
+    no response and no `__cause__`. The 401 is simply not in the exception, so a 'needs a token'
+    server is indistinguishable from a dead host unless we record the status at the moment it
+    arrives. (The SSE client does raise the real status error; this is the streamable path's gap.)
+    """
+    seen: dict[str, int | None] = {"status": None}
+
+    async def hook(response) -> None:
+        seen["status"] = response.status_code
+
+    return seen, hook
+
+
+async def _bounded(coro_factory, name: str, transport: str, timeout: float,
+                   status_hint: Any = None) -> ServerSnapshot:
     try:
         return await asyncio.wait_for(coro_factory(), timeout)
     except (asyncio.TimeoutError, TimeoutError) as e:
+        # NOT "unreachable": something accepted the connection and then never answered. That is a
+        # different fault with a different fix — look at the server's own logs, not at the address —
+        # and it is the one the beta page describes as "sits there doing nothing".
         return ServerSnapshot(name=name, transport=transport, protocol_version=None,
                               error=f"no MCP response within {timeout:.0f}s: {type(e).__name__}",
-                              error_kind="unreachable")
+                              error_kind="timed-out")
     except Exception as e:  # noqa: BLE001 — surface, never crash the scan
         real = _unwrap(e)
+        status = status_hint() if status_hint is not None else None
         return ServerSnapshot(name=name, transport=transport, protocol_version=None,
-                              error=f"{type(real).__name__}: {real}", error_kind=_kind_of(real))
+                              error=f"{type(real).__name__}: {real}",
+                              error_kind=_kind_of(real, status))
 
 
-def _kind_of(exc: BaseException) -> str:
+def _kind_of(exc: BaseException, status: int | None = None) -> str:
     """Classify a probe failure by EXCEPTION TYPE, never by message text (F2's lesson). An
     HTTPStatusError means the host answered HTTP and then refused to speak MCP — that is a live URL
     that isn't an MCP endpoint (a docs page, a 404, a 405 on the wrong path), which is a different
-    user action ("check the URL") from a dead host ("check the server is running")."""
-    try:
-        import httpx
-    except ImportError:                                   # pragma: no cover - httpx is an mcp dep
-        return "unreachable"
-    if isinstance(exc, httpx.HTTPStatusError):
+    user action ("check the URL") from a dead host ("check the server is running").
+
+    BOTH httpx and httpx2 are checked, and that is load-bearing. SDK v2's transports run on the
+    httpx2 fork (see `_no_redirect_http_client`), so every status error raised by an actual MCP
+    connection is an `httpx2.HTTPStatusError` — a type whose `__name__` is also "HTTPStatusError",
+    which is why the ladder's error text looked right while the classification silently fell
+    through to "unreachable". Only our own non-MCP fetches (the Server Card) raise the plain httpx
+    type. Checking one fork is the same as checking neither."""
+    types: list[type] = []
+    for module in ("httpx", "httpx2"):
+        try:
+            types.append(__import__(module).HTTPStatusError)
+        except ImportError:                               # pragma: no cover - both are mcp deps
+            continue
+    if types and isinstance(exc, tuple(types)):
         # 401/403 is the endpoint telling us it IS there and we are not allowed in. Reporting that
         # as "not an MCP endpoint" sends the user to check their URL when the real fix is a token —
         # observed live against a real hosted server, which is why this case is split out.
-        if exc.response is not None and exc.response.status_code in (401, 403):
+        response = getattr(exc, "response", None)
+        if response is not None and getattr(response, "status_code", None) in (401, 403):
             return "auth-required"
         return "not-an-mcp-endpoint"
+    # Nothing in the exception, but the transport SAW a refusal (see `_status_recorder`). Only
+    # 401/403 is read this way: those are the one case where the endpoint is provably live and the
+    # user's next move is a credential, not a different URL. Any other recorded status is left to
+    # the type-based rules above rather than guessed at from a number.
+    if status in (401, 403):
+        return "auth-required"
+    try:
+        from .oauth_login import LoginNeeded
+        if isinstance(exc, LoginNeeded):
+            return "auth-required"           # the refresh failed; the fix is a sign-in, not a URL
+    except ImportError:                                   # pragma: no cover
+        pass
+    if _connect_failed(exc):
+        return "connect-failed"
     return "unreachable"
+
+
+def _connect_failed(exc: BaseException) -> bool:
+    """Did the connection never get made — nothing accepted it? By type, as above: a
+    `ConnectionRefusedError` anywhere in the cause chain (anyio folds several into an
+    `ExceptionGroup`, httpcore wraps that, httpx wraps httpcore), or the httpx/httpx2/httpcore
+    `ConnectError` both MCP transports raise around one. The distinction matters only in aggregate
+    (see `_aggregate_failure`): on a LOOPBACK address it means nothing on this machine holds the
+    port — DNS and routing cannot fail there, so a connect failure IS a refusal."""
+    seen: set[int] = set()
+
+    def _walk(e: BaseException | None) -> bool:
+        if e is None or id(e) in seen:
+            return False
+        seen.add(id(e))
+        if isinstance(e, ConnectionRefusedError):
+            return True
+        for module in ("httpx", "httpx2", "httpcore", "httpcore2"):
+            try:
+                if isinstance(e, __import__(module).ConnectError):
+                    return True
+            except (ImportError, AttributeError):
+                continue
+        if isinstance(e, BaseExceptionGroup) and any(_walk(sub) for sub in e.exceptions):
+            return True
+        return _walk(e.__cause__) or _walk(e.__context__)
+
+    return _walk(exc)
+
+
+def is_loopback_url(url: str) -> bool:
+    """Is this URL's host this machine's own loopback? localhost, 127.0.0.0/8, ::1 — the addresses
+    where "connection refused" means "no process holds that port", not "the network is down"."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    host = (urlsplit(url).hostname or "").strip("[]").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 async def probe_stdio(name: str, command: str, args: list[str] | None = None,
@@ -201,12 +327,53 @@ async def probe_stdio(name: str, command: str, args: list[str] | None = None,
         if snap.error:
             detail = _stderr_tail(errlog)
             if detail:
-                snap = replace(snap, error=f"{snap.error} — the server said: {detail}")
+                # A server that PRINTED something before dying is a different animal from silence at
+                # an address: it launched, it ran, and it told us what was wrong (missing module,
+                # missing credential). Typing it separately is what lets the fleet row and the
+                # next-step hint stop calling it "no MCP endpoint found" and pointing at URLs.
+                # A HANG that also printed a startup banner is still a hang. Overwriting the kind
+                # unconditionally relabelled it `server-failed` — "started, then failed … the launch
+                # command itself is fine" — when the right advice is the timeout one (check its logs;
+                # it may be waiting on a credential or a lock). Almost every real server prints
+                # something on startup, so this hit the common case. Keep what it managed to say
+                # either way: the words are useful, the CLASSIFICATION is what must not change.
+                kind = "timed-out" if snap.error_kind == "timed-out" else "server-failed"
+                hint = _cause_hint(detail)
+                snap = replace(snap, error=f"{snap.error} — the server said: {detail}"
+                                     + (f" — hint: {hint}" if hint else ""),
+                               error_kind=kind)
         return snap
 
 
-def _stderr_tail(errlog, limit: int = 200) -> str:
-    """The last line the server printed that looks like a real message.
+def _cause_hint(detail: str) -> str | None:
+    """A next step for the two failure causes the registry crawl saw most (ledger 114, from
+    mcpgawk-universe's 52-server run): six packages ship no console script named after
+    themselves — uv prints the fix itself, so quote uv verbatim; and two servers die on
+    `mcp.server.fastmcp`, which mcp 2.x renamed. Additive text only: `error_kind` and the
+    "the server said:" prefix the crawl parses are untouched. None for everything else."""
+    if not detail:
+        return None
+    for line in detail.split(" ⏎ "):
+        stripped = line.strip()
+        if stripped.startswith("Use `uvx --from ") and stripped.endswith("instead."):
+            return stripped                       # uv's own sentence is the fix; do not paraphrase
+    if "No module named 'mcp.server.fastmcp'" in detail:
+        return ("the server imports FastMCP from mcp<2, which mcp 2.x renamed to "
+                "`mcp.server.mcpserver`; run it with `mcp<2` pinned, or ask its publisher to migrate")
+    return None
+
+
+#: How much of a failed server's stderr survives into the label. The LAST line is usually a log
+#: path (`npm error A complete log … debug-0.log`), a closing brace (`npm WARN EBADENGINE }`) or a
+#: uv hint; the line that names the cause sits 2–30 lines above it. Keeping one line left 5 of 25
+#: local registry failures undiagnosable (mcpgawk-universe crawl, 2026-09-04, brief §1a).
+STDERR_LINES_KEPT = 20
+STDERR_JOIN = " ⏎ "
+
+
+def _stderr_tail(errlog, limit: int = 200, lines_kept: int = STDERR_LINES_KEPT) -> str:
+    """The last `lines_kept` lines the server printed that look like real messages, each redacted
+    and capped at `limit`, joined with `STDERR_JOIN` — the cause and the log path together.
 
     Only consulted when the probe FAILED, so package-manager chatter on a healthy start is never
     shown. Trailing blank lines and ANSI are stripped so the message reads as a sentence."""
@@ -224,7 +391,8 @@ def _stderr_tail(errlog, limit: int = 200) -> str:
     # can be exported as JSON and read by an agent. Redacting here means the raw text never
     # propagates, rather than relying on every downstream consumer to remember.
     from .redact import redact
-    return (redact(lines[-1]) or "")[:limit]
+    kept = [(redact(ln) or "")[:limit] for ln in lines[-lines_kept:]]
+    return STDERR_JOIN.join(ln for ln in kept if ln)
 
 
 def _no_redirect_http_client(headers=None, timeout=None, auth=None):
@@ -256,6 +424,8 @@ async def probe_http(name: str, url: str, headers: dict[str, str] | None = None,
     `auth` is an optional httpx.Auth (e.g. the SDK's OAuthClientProvider from `--login`) that drives
     an interactive OAuth flow; the token it obtains stays on this machine. When `auth` is present we
     force a no-redirect client so an OAuth credential can't leak across a redirect (see factory)."""
+    seen, record = _status_recorder()
+
     async def _do():
         # SDK v2: headers/auth no longer ride the transport call — they live on a caller-owned
         # http client. The auth path keeps the no-redirect client for the same credential-leak
@@ -264,13 +434,16 @@ async def probe_http(name: str, url: str, headers: dict[str, str] | None = None,
             http_client = _no_redirect_http_client(headers=headers or {}, auth=auth)
         else:
             http_client = create_mcp_http_client(headers=headers or {})
+        # Watch the wire, because the exception won't tell us (see `_status_recorder`).
+        http_client.event_hooks["response"] = [
+            *http_client.event_hooks.get("response", []), record]
         async with http_client:
             async with streamable_http_client(url, http_client=http_client) as (read, write):
                 async with ClientSession(read, write) as session:
                     snap = await _snapshot(session, name, "http")
         snap.server_card = await fetch_card(url)   # public, unauthenticated; tolerant
         return snap
-    return await _bounded(_do, name, "http", timeout)
+    return await _bounded(_do, name, "http", timeout, status_hint=lambda: seen["status"])
 
 
 async def probe_sse(name: str, url: str, headers: dict[str, str] | None = None,
@@ -340,11 +513,11 @@ async def probe_url(name: str, url: str, headers: dict[str, str] | None = None,
             skipped.extend(c.label for c in cands[i + 1:])
             break
 
-    return _aggregate_failure(name, declared, attempts, skipped)
+    return _aggregate_failure(name, declared, attempts, skipped, url=url)
 
 
 def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, ServerSnapshot]],
-                       skipped: list[str]) -> ServerSnapshot:
+                       skipped: list[str], url: str | None = None) -> ServerSnapshot:
     """One honest error for the whole ladder. Reporting only the last attempt's error would be a
     lie by omission — the user needs to see that we tried the other transport and the other paths,
     or they will chase a "server down" that is really a typo (and vice versa)."""
@@ -354,21 +527,47 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
         kind = "auth-required"
     elif "not-an-mcp-endpoint" in kinds:
         kind = "not-an-mcp-endpoint"
+    elif "timed-out" in kinds:
+        # Above "unreachable" for the same reason as the two before it: a candidate that ACCEPTED
+        # the connection and went quiet says more than the ones that refused outright, and sends
+        # the user somewhere different.
+        kind = "timed-out"
+    elif url and kinds and kinds <= {"connect-failed"} and is_loopback_url(url):
+        # EVERY attempt was refused at a loopback address: no process on this machine holds that
+        # port. This is not "the server is down" — it is a stale entry, and the worse of the two
+        # stale shapes (2026-09-02, `palmier-pro` at 127.0.0.1:19789 with the app uninstalled):
+        # any process that binds the port answers AS this server to every client that already
+        # trusts the name. No planted file, no privilege, a free port. A dangling COMMAND at least
+        # needs a file written at a known path; this needs nothing. Named so the row can say it.
+        kind = "nothing-listening"
     else:
         kind = "unreachable"
 
     # One attempt per LINE: httpx errors carry a "For more information check: <mdn url>" second line
     # that turns a 5-attempt ladder into an unreadable wall. Collapse each to a single line.
-    lines = [f"  - {label}: {' '.join(snap.error.split())}" for label, snap in attempts]
+    # `or ""` is not defensive noise: this runs only when everything already failed, and an
+    # attempt that somehow carries no message must not turn a readable failure ladder into an
+    # AttributeError on the one path the user is relying on for an explanation.
+    lines = [f"  - {label}: {' '.join((snap.error or 'no detail').split())}"
+             for label, snap in attempts]
     if skipped:
         why = ("endpoint found, it needs credentials" if kind == "auth-required"
                else f"time budget {PERMUTE_BUDGET:.0f}s exhausted")
         lines.append(f"  - not attempted ({why}): " + ", ".join(skipped))
-    head = ("authentication required — the endpoint is live but refused this scan; "
-            "retry with `--login` or `--header \"Authorization: Bearer …\"`"
-            if kind == "auth-required" else
-            f"no MCP endpoint found — tried {len(attempts)} transport/path permutation"
-            f"{'s' if len(attempts) != 1 else ''}")
+    if kind == "auth-required":
+        head = ("authentication required — the endpoint is live but refused this scan; "
+                "retry with `--login` or `--header \"Authorization: Bearer …\"`")
+    elif kind == "timed-out":
+        head = ("no answer within the time budget — the connection was accepted and the server "
+                "never replied")
+    elif kind == "nothing-listening":
+        from urllib.parse import urlsplit
+        where = urlsplit(url or "").netloc or "its loopback address"
+        head = (f"nothing is listening on {where} — every attempt was refused. The entry is still "
+                f"configured, so whatever binds that port next answers as this server")
+    else:
+        head = (f"no MCP endpoint found — tried {len(attempts)} transport/path permutation"
+                f"{'s' if len(attempts) != 1 else ''}")
     return ServerSnapshot(name=name, transport=declared, protocol_version=None,
                           error="\n".join([head + ":", *lines]), error_kind=kind)
 
@@ -391,8 +590,59 @@ def _missing_program(command: str) -> bool:
 
 
 async def probe(entry: dict[str, Any], name: str) -> ServerSnapshot:
-    """Dispatch a config entry (mcp.json shape) to the right transport."""
+    """Dispatch a config entry (mcp.json shape) to the right transport.
+
+    This is the ONE place a config entry becomes a snapshot, so it is the one place that can say
+    which login the entry uses — stamped on every snapshot it returns, error paths included, so
+    identity does not depend on whether the probe succeeded.
+    """
+    snap = await _probe(entry, name)
+    return replace(snap, credential_fingerprint=credential_fingerprint(entry),
+                   login_id=entry.get(LOGIN_ID_KEY))
+
+
+async def probe_held(session: ClientSession, entry: dict[str, Any],
+                     name: str) -> ServerSnapshot:
+    """Measure through a session SOMEONE ELSE opened and is holding — see `remote_login`.
+
+    Servers that authenticate IN BAND (kite: a `login` tool returning a URL bound to the one
+    session that asked) can only be observed signed-in from inside that same session. Every other
+    path here opens its own, which is why the signed-in state has never been measured.
+
+    It goes through `_snapshot` and stamps the credential fingerprint exactly as `probe` does, so
+    a held-session measurement lands on the SAME store key as an ordinary scan of the same entry.
+    A second, hand-rolled listing would key or pin differently and manufacture drift between two
+    views of one server.
+    """
+    # The transport is what the held session actually SPEAKS, not what the entry declares:
+    # `remote_login.held_session` opens a stdio pipe for a command and streamable HTTP for a URL,
+    # never SSE. `probe_url` records the candidate that answered, so an entry declaring `sse`
+    # over a server that speaks streamable HTTP is recorded as `http` by an ordinary scan — and
+    # stamping the declared word here would make the held view differ from it (`transport_changed`
+    # drift, or a different legacy key: manufactured drift between two views of one server, the
+    # exact class this function's docstring promises to avoid).
+    transport = "stdio" if entry.get("command") else "http"
+    # Bounded and converted like every other measuring path: a server that hangs or errors AFTER
+    # the sign-in must become an error row, not an exception thrown across the thread boundary
+    # that kills the whole scan (`_measure_through_signin` runs this via a future).
+    snap = await _bounded(lambda: _snapshot(session, name, transport), name, transport,
+                          DEFAULT_TIMEOUT)
+    return replace(snap, credential_fingerprint=credential_fingerprint(entry),
+                   login_id=entry.get(LOGIN_ID_KEY))
+
+
+async def _probe(entry: dict[str, Any], name: str) -> ServerSnapshot:
     if entry.get("command"):
+        # Desktop EXTENSIONS launch through placeholders (`${__dirname}`, `${user_config.*}`).
+        # verify has resolved them since 38i-q; the SCAN path never did, so an extension like
+        # Revolut X launched the literal string `node ${__dirname}/dist/index.js`, failed, and
+        # recorded UNREACHABLE — which then gated every downstream surface (no baseline → no
+        # sign-in button → "the revolut login is not even starting", founder 2026-08-14). Resolve
+        # with Desktop's OWN values (settings file, else manifest defaults) — the same launch
+        # Desktop itself performs; an extension that genuinely cannot launch outside Desktop
+        # still refuses honestly (resolve returns None → the raw entry → command-missing).
+        from . import dxt as _dxt
+        entry = _dxt.resolve_for_launch(entry) or entry
         command = entry["command"]
         if _missing_program(command):
             # Not launched: there is nothing to launch. Worth its own kind because a configured
@@ -414,4 +664,15 @@ async def probe(entry: dict[str, Any], name: str) -> ServerSnapshot:
     # the order we try things in, never what we trust. See probe_url / transport.py.
     transport = entry.get("transport", "http")
     headers = entry.get("headers")
-    return await probe_url(name, url, headers, declared=transport)
+    auth = None
+    if entry.get("_refreshable_login"):
+        # The stored login, able to REFRESH — and refusing to open a browser. With a provider the
+        # permutation ladder is off, as it is for --login: a credential is offered to the URL the
+        # config names, never to guesses.
+        from .oauth_login import refresh_only_provider
+        auth = refresh_only_provider(str(entry["_refreshable_login"]))
+    if auth is None:
+        return await probe_url(name, url, headers, declared=transport)
+    # A refresh is one extra round trip to the token endpoint before the MCP handshake.
+    return await probe_url(name, url, headers, HTTP_TIMEOUT * 2, auth, declared=transport,
+                           permute=False)

@@ -83,6 +83,12 @@ def run_captured(argv: list[str], timeout: float | None = None) -> tuple[int, st
     if reason is not None:
         return 3, f"mcpgawk verify: {reason}"
     node = find_node()
+    if node is None:
+        # `unavailable_reason` above already looks for Node, but it calls `find_node` separately —
+        # so this is a second lookup, and only this one's result is handed to subprocess. Passing
+        # None as argv[0] raises a TypeError from deep inside subprocess instead of the actionable
+        # sentence the caller is built to print.
+        return 3, f"mcpgawk verify: {install_hint()}"
     cli_js = resolve_cli_js()
     try:
         proc = subprocess.run([node, str(cli_js), *argv], env={**os.environ}, timeout=timeout,
@@ -100,7 +106,7 @@ def run_captured(argv: list[str], timeout: float | None = None) -> tuple[int, st
         return 3, f"mcpgawk verify: could not start the engine ({exc})"
 
 
-#: Flags that belong to gawk Platform's SOURCE AUDITOR, not to the TS engine. They are handled on
+#: Flags that belong to mcpgawk Platform's SOURCE AUDITOR, not to the TS engine. They are handled on
 #: the Python side (the auditor is Python). Before 2026-08-07 the free wrapper passed them
 #: straight through to an engine that had never heard of them: `--audit-source` was silently
 #: ignored, and `--source-dir <path>`'s PATH was read as the positional config argument — a run
@@ -112,7 +118,7 @@ def _wants_source_audit(argv: list[str]) -> bool:
 
 
 _AUDIT_NEEDS_PLATFORM = (
-    "mcpgawk verify --audit-source: source audit is a gawk Platform capability and the Platform "
+    "mcpgawk verify --audit-source: source audit is a mcpgawk Platform capability and the Platform "
     "isn't installed in this environment.\n"
     "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
     "Behavioural verification itself is free: re-run without --audit-source / --source-dir."
@@ -148,6 +154,8 @@ def run(argv: list[str], timeout: float | None = None) -> int:
     # timeout or a Ctrl-C left the engine reparented to PID 1, still launching containers, still
     # writing into ~/.gawk/verify-runs, indefinitely. Observed live: two orphans and four
     # containers survived their parents by minutes and had to be killed by hand.
+    if node is None:                       # same second-lookup gap as `run` above
+        return 3
     proc = subprocess.Popen([node, str(cli_js), *argv], env={**os.environ}, start_new_session=True)
 
     def _kill_the_whole_group() -> None:

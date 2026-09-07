@@ -14,53 +14,30 @@ here is a function of the labels, so the states a user sees are directly testabl
 """
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from . import configcheck
 from .ambient import detect_ambient, summarize
+from .redact import redact_url
 from .probe import _missing_program
 
 #: Query-param names whose VALUE is a credential — masked before a URL is ever displayed. A security
 #: tool that renders a live API key in its own fleet view (screenshots, screen-shares) is the wrong
 #: look; the real URL still lives in the server's launch spec (server-side) for verify/auth.
-_SECRET_PARAM = re.compile(r"(key|token|secret|pass|pwd|auth|sig|credential)", re.I)
 
-
-def redact_url(url: str | None) -> str | None:
-    """Mask secret-looking query-string values and any userinfo in a URL, for DISPLAY only. Returns
-    the URL unchanged when there is nothing sensitive. The un-redacted URL is kept on `FleetRow.url`
-    (for the in-process auth flow) and in the launch `spec` (server-side, for verify)."""
-    if not url:
-        return url
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return url
-    changed = False
-    netloc = parts.netloc
-    if "@" in netloc:  # user:pass@host
-        creds, host = netloc.rsplit("@", 1)
-        user = creds.split(":", 1)[0]
-        netloc = f"{user}:***@{host}" if ":" in creds else f"***@{host}"
-        changed = True
-    query = parts.query
-    pairs = parse_qsl(parts.query, keep_blank_values=True)
-    if pairs:
-        masked = [(k, "***" if (v and _SECRET_PARAM.search(k)) else v) for k, v in pairs]
-        if masked != pairs:
-            query, changed = urlencode(masked, safe="*"), True
-    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment)) if changed else url
 
 #: The states a server can be in, in the order a human should deal with them. Ordering is a product
 #: decision, not cosmetics: the things that BLOCK a scan (needs credentials, unreachable) come before
 #: findings, because an unscanned server is an unknown, and an unknown outranks a known risk.
-STATES = ("AUTH", "UNREACHABLE", "SKIPPED", "NOT-SCANNABLE", "REVIEW", "INCOMPLETE", "CLEAN")
+#: FAILED sits above UNREACHABLE on purpose: both block a scan, but a server that ran and printed
+#: a reason has a fix the user can act on today, while "nothing answered" still needs diagnosing.
+STATES = ("AUTH", "FAILED", "TIMED-OUT", "UNREACHABLE", "SKIPPED", "NOT-SCANNABLE", "REVIEW",
+          "INCOMPLETE", "CLEAN")
 
 _MARK = {
-    "AUTH": "●", "UNREACHABLE": "●", "SKIPPED": "○", "NOT-SCANNABLE": "◌",
-    "REVIEW": "●", "INCOMPLETE": "●", "CLEAN": "●",
+    "AUTH": "●", "FAILED": "●", "TIMED-OUT": "●", "UNREACHABLE": "●", "SKIPPED": "○",
+    "NOT-SCANNABLE": "◌", "REVIEW": "●", "INCOMPLETE": "●", "CLEAN": "●",
 }
 
 
@@ -71,6 +48,10 @@ class FleetRow:
     detail: str
     url: str | None = None          # set for remote servers, so the auth step knows where to go
     clients: tuple[str, ...] = ()   # which IDE / AI tool(s) this server is configured in
+    # What each of those clients CALLS it. One server can be configured under a different name in
+    # every client, and `name` above can only be one of them — so a group rendered the first-seen
+    # name under clients that use a different one, and the user could not find it or `--only` it.
+    names: dict[str, str] = field(default_factory=dict)
     # The launch spec (command/args/env, or url/headers) a front-end needs to VERIFY this server by
     # click. Populated ONLY when the caller asks (build_rows(with_spec=True)); it can carry secrets
     # from the user's own config (an `env` API key), so it is never in the default fleet-json — see
@@ -105,11 +86,28 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
             return "UNREACHABLE", "config entry is not usable"
         if x.get("error_kind") == "not-an-mcp-endpoint":
             return "UNREACHABLE", "responds, but does not speak MCP"
+        if x.get("error_kind") == "timed-out":
+            # The beta page's "sits there doing nothing", named. It is NOT "no endpoint found":
+            # the server is there, it took the connection, and it never spoke.
+            return "TIMED-OUT", "accepted the connection, then never answered"
+        if x.get("error_kind") == "server-failed":
+            # Deliberately NOT the server's own text — see the note below about the 2026-07-28
+            # attempt that had to be backed out. The row's job is to separate "it ran and failed"
+            # from "nothing answered", which are different user actions; the message itself is one
+            # flag away and stays where redaction and trimming cannot make it read worse.
+            return "FAILED", "started, then failed — see its own message with --detail"
         if x.get("error_kind") == "command-missing":
             # Deliberately NOT phrased as "dead". The entry is still configured and still approved,
             # so anything that later appears at that path is executed without being asked about
             # again. That is a standing invitation, not a dead link.
             return "UNREACHABLE", "its program no longer exists — still configured, so anything at that path would run"
+        if x.get("error_kind") == "nothing-listening":
+            # The loopback twin of command-missing, and the worse one: a missing program needs a
+            # file planted at a known path before anything runs; a free loopback port needs only a
+            # process that binds it. Same standing invitation, no planting required.
+            return "UNREACHABLE", ("nothing is listening at its loopback address — still "
+                                   "configured, so whatever binds that port next answers as this "
+                                   "server")
         # NOT YET: surfacing the server's own reason here is worth doing — a config pointing at a
         # deleted file reads only as "no MCP endpoint found" while the server's stderr named the
         # missing path. Attempted 2026-07-28 and backed out: redact() mangles ordinary paths
@@ -133,11 +131,23 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
                   if (s.get("kind") or "").startswith("injection:")]
     if injections:
         bits.append(f"⚠ {len(injections)} injection finding{'s' if len(injections) != 1 else ''}")
+    secrets = [s for s in (x.get("bounded_signals") or [])
+               if (s.get("kind") or "").startswith("secret:")]
+    if secrets:
+        bits.append(f"⚠ {len(secrets)} hardcoded secret{'s' if len(secrets) != 1 else ''}")
+    config = [s for s in (x.get("bounded_signals") or [])
+              if (s.get("kind") or "").startswith("config:")]
+    risky_config = [s for s in config if (s.get("kind") or "") in configcheck.RISKY_KINDS]
+    if config:
+        # Counted with a warning only when a kind is REVIEW-worthy on its own; an unpinned
+        # version is the ecosystem default and must inform, not shout (see configcheck.RISKY_KINDS).
+        mark = "⚠ " if risky_config else ""
+        bits.append(f"{mark}{len(config)} config finding{'s' if len(config) != 1 else ''}")
 
     detail = " · ".join(bits)
     if has_dispatch:
         return "INCOMPLETE", detail + " · hides its real catalog"
-    if injections or flags.get("high_reach") or flags.get("heavy"):
+    if injections or secrets or risky_config or flags.get("high_reach") or flags.get("heavy"):
         return "REVIEW", detail
     return "CLEAN", detail
 
@@ -154,12 +164,32 @@ def skipped_row(name: str, entry: dict[str, Any]) -> FleetRow:
     # was the whole point: a dangling entry is most likely to be found in a default scan, and
     # reporting it only when the user opts into launching would hide it exactly where it matters.
     if _missing_program(entry.get("command") or ""):
+        # THE CONFIG FINDINGS BELONG HERE TOO — they were dropped until 2026-09-02, and this row
+        # is the one that says "anything at that path would run" while declining to say WHAT it
+        # would do. `--allow-build`, TLS verification off, a plaintext credential: all read from
+        # the entry text, none of which depends on the program existing. A reinstall, or anything
+        # else landing at that path, runs under exactly this configuration.
+        #
+        # Found by the release gate, not by us: the four `test_configcheck` tests passed on macOS
+        # only because `pnpm` happened to be installed there, and failed on Linux CI where it is
+        # not — the same fixture became UNREACHABLE and its findings vanished.
+        detail = f"`{cmd}` no longer exists — still configured, so anything at that path would run"
+        summary = configcheck.summarize(configcheck.check(name, entry))
+        if summary:
+            detail += f" · {summary}"
         return FleetRow(
-            name=name, state="UNREACHABLE",
-            detail=f"`{cmd}` no longer exists — still configured, so anything at that path would run",
-            clients=tuple(entry.get("_clients") or ()))
-    return FleetRow(name=name, state="SKIPPED", detail=f"local `{cmd}` — not launched (needs --yes)",
-                    clients=tuple(entry.get("_clients") or ()))
+            name=name, state="UNREACHABLE", detail=detail,
+            clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}))
+    # Config-only findings answer WITHOUT launching — and the declined server is exactly where
+    # they matter most: the tester whose first run declined every local server saw "Findings 0"
+    # because nothing was scanned, not because nothing was wrong. Zero execution, so consent to
+    # launch was never needed for this part of the answer.
+    detail = f"local `{cmd}` — not launched (needs --yes)"
+    summary = configcheck.summarize(configcheck.check(name, entry))
+    if summary:
+        detail += f" · {summary}"
+    return FleetRow(name=name, state="SKIPPED", detail=detail,
+                    clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}))
 
 
 def unscannable_row(item: dict[str, str]) -> FleetRow:
@@ -184,7 +214,7 @@ def build_rows(labels: list[dict[str, Any]], entries: dict[str, dict[str, Any]] 
         state, detail = state_of(lab)
         entry = entries.get(lab["name"]) or {}
         rows.append(FleetRow(name=lab["name"], state=state, detail=detail, url=entry.get("url"),
-                             clients=tuple(entry.get("_clients") or ()),
+                             clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}),
                              spec=_spec_of(entry) if with_spec else None))
     for n, e in (skipped or []):
         row = skipped_row(n, e)
@@ -222,7 +252,8 @@ _CLIENT_TITLE = {
 }
 
 
-def _group_by_client(rows: list[FleetRow]) -> list[tuple[str, list[FleetRow]]]:
+def _group_by_client(rows: list[FleetRow],
+                     localise: bool = True) -> list[tuple[str, list[FleetRow]]]:
     """(client, rows) sections. A server present in several tools is listed under EACH — it really
     is configured in each, and hiding it from all but one would send the reader to the wrong config
     file when they try to remove it. Sections are ordered by their most urgent row, so the tool that
@@ -230,7 +261,20 @@ def _group_by_client(rows: list[FleetRow]) -> list[tuple[str, list[FleetRow]]]:
     groups: dict[str, list[FleetRow]] = {}
     for r in rows:
         for client in (r.clients or ("",)):
-            groups.setdefault(client, []).append(r)
+            # Under each client, call it what THAT client calls it. One server can be configured
+            # under a different name in every tool, and `r.name` can only be one of them — printing
+            # it everywhere sent the reader to a config file to look for a name that is not in it.
+            # Substituted here rather than in the renderer: the section already knows the client,
+            # and every caller of _group_by_client gets the fix for free.
+            # `localise` is False for the JSON, and that is load-bearing: `groups[].servers` is a
+            # JOIN KEY into the top-level `servers` array, which is keyed by the canonical name.
+            # Substituting there made the key miss, and the extension's `byName.get(n)` returns
+            # nothing on a miss — so a client's tree silently omitted a server it does contain,
+            # which is exactly the "renders like it isn't there" failure this rename set out to fix.
+            # The front-end gets the local label from each server's `names` map instead.
+            local = r.names.get(client) if localise else None
+            groups.setdefault(client, []).append(
+                replace(r, name=local) if local and local != r.name else r)
     order = {s: i for i, s in enumerate(STATES)}
     return sorted(
         ((c, sort_rows(g)) for c, g in groups.items()),
@@ -301,7 +345,15 @@ def render_fleet(rows: list[FleetRow], scanned_at: str | None = None) -> str:
 
 #: Bumped only on a BREAKING change to the payload below. The IDE extension pins it, so an older
 #: extension talking to a newer CLI fails loudly instead of silently mis-rendering someone's fleet.
-FLEET_SCHEMA = "mcpgawk.fleet/1"
+#: Bumped to /2 on 2026-08-09 when FAILED and TIMED-OUT joined STATES. Adding a state IS a breaking
+#: payload change for an already-installed client: the extension types STATE_ICON as
+#: `Record<FleetState, …>` and destructures the lookup, so an unknown state threw
+#: `Cannot destructure property 'icon' of undefined` and killed the WHOLE tree, not just that row.
+#: The pin exists precisely to turn that into the loud "update one side or the other" refusal, and
+#: shipping new states under the old number walked around it. Bump whenever the payload gains
+#: anything an older client would have to understand — a new state, a renamed field, a changed
+#: meaning. Purely additive fields a client can ignore (`names`) do not need it.
+FLEET_SCHEMA = "mcpgawk.fleet/2"
 
 
 def to_json(rows: list[FleetRow]) -> dict[str, Any]:
@@ -318,6 +370,9 @@ def to_json(rows: list[FleetRow]) -> dict[str, Any]:
         "servers": [
             {"name": r.name, "state": r.state, "detail": r.detail, "url": redact_url(r.url),
              "clients": list(r.clients), "can_authenticate": r.needs_auth,
+             # What each client calls it, so a front-end can label a row the way the reader's own
+             # config does without the name ceasing to work as the join key. Omitted when empty.
+             **({"names": dict(r.names)} if r.names else {}),
              # `spec` present only under --with-spec; `scannable` is the safe, secret-free signal a
              # front-end uses to decide whether to offer a "verify by click" action.
              **({"spec": r.spec, "scannable": True} if r.spec else {})}
@@ -325,7 +380,8 @@ def to_json(rows: list[FleetRow]) -> dict[str, Any]:
         ],
         "groups": [{"client": c, "title": _CLIENT_TITLE.get(c, c.upper()),
                     "servers": [r.name for r in g]}
-                   for c, g in _group_by_client(rows)],
+                   # localise=False: these names are the join key into `servers[]` above.
+                   for c, g in _group_by_client(rows, localise=False)],
         "summary": {
             "counts": {s: n for s, n in counts.items() if n},
             "scannable": len(rows) - counts["NOT-SCANNABLE"],

@@ -19,6 +19,7 @@ does the persisting.
 from __future__ import annotations
 
 import re
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 PLACEHOLDER = "[REDACTED]"
 
@@ -47,7 +48,10 @@ _SECRETS = [
     # The paired username of a credential. On its own a username is not a secret, but sitting next to
     # an assignment in the same config it is half of a working login.
     re.compile(r"(?i)\b(?:[\w.-]+[_.\-])?(?:user(?:name)?|login|account)[\"']?\s*[:=]\s*[\"']?\S{8,}"),
-    re.compile(r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+\S+"),
+    # `(?![<…])`: our own retry hint reads `--header "Authorization: Bearer …"`, and the alert
+    # table showed it as `--header "[REDACTED]` — advice mangled by the redactor (2026-09-03). A
+    # placeholder (`…`, `<token>`) is not a credential.
+    re.compile(r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+(?![<…])\S+"),
 ]
 
 #: Personal data. Emails are the realistic leak in a description; card-shaped digit runs are rare
@@ -76,3 +80,74 @@ def redact(text: str | None) -> str | None:
 def contains_secret(text: str | None) -> bool:
     """True when `text` still looks like it carries a credential. For assertions and tests."""
     return text is not None and any(p.search(text) for p in _ALL)
+
+
+#: Query-parameter NAMES whose value is a credential. Matched loosely on purpose: a URL is written
+#: by whoever configured the server, and `apiKey`, `api_token`, `access_key` and `sig` are all in the
+#: wild. Over-masking a display string costs nothing; under-masking prints a live key.
+_SECRET_PARAM = re.compile(r"(key|token|secret|pass|pwd|auth|sig|credential)", re.I)
+
+
+def redact_url(url: str | None) -> str | None:
+    """Mask secret-looking query-string values and any userinfo in a URL, for DISPLAY only. Returns
+    the URL unchanged when there is nothing sensitive. The un-redacted URL is kept on `FleetRow.url`
+    (for the in-process auth flow) and in the launch `spec` (server-side, for verify)."""
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    changed = False
+    netloc = parts.netloc
+    if "@" in netloc:  # user:pass@host
+        creds, host = netloc.rsplit("@", 1)
+        user = creds.split(":", 1)[0]
+        netloc = f"{user}:***@{host}" if ":" in creds else f"***@{host}"
+        changed = True
+    query = parts.query
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    if pairs:
+        masked = [(k, "***" if (v and _SECRET_PARAM.search(k)) else v) for k, v in pairs]
+        if masked != pairs:
+            query, changed = urlencode(masked, safe="*"), True
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment)) if changed else url
+
+
+#: A URL sitting inside free prose — an error message, a subprocess's echoed command line, a log
+#: line. Stops at whitespace and at the quote/bracket characters that delimit a URL inside a repr
+#: (`Command '[... 'https://…?apiKey=…', ...]' timed out`), so the mask lands on the URL and not on
+#: the surrounding sentence.
+_URL_IN_TEXT = re.compile(r"https?://[^\s'\"<>)\]}]+")
+
+
+def redact_urls_in_text(text: str | None) -> str | None:
+    """Mask credentials in every URL found inside `text`, leaving the rest of the prose intact.
+
+    `redact()` is the wrong tool for a message a human has to act on: its placeholder swallows the
+    surrounding token, and this module's own doctrine is that over-redaction destroys the evidence
+    the surface exists to show. `redact_url` keeps the host and the parameter names — `apiKey=***`
+    — so an operator can still see WHICH server failed, which is the whole point of the message.
+    """
+    if not text:
+        return text
+    return _URL_IN_TEXT.sub(lambda m: redact_url(m.group(0)) or m.group(0), text)
+
+
+def redact_ident(value: str) -> str:
+    """Mask a credential inside an IDENTITY string — a tool name, a server name, a resource URI.
+
+    Identities are server-controlled and they are written to disk as map keys and log fields, where
+    a whole-blob redaction would destroy the very thing the record exists to identify. URL-shaped
+    idents keep their host and parameter names (`redact_url`); everything else goes through the
+    prose redactor, which needs an assignment shape to fire — so an ordinary name like
+    `create_api_key` is left exactly as it is.
+
+    Idempotent: a masked ident carries no credential shape, so re-masking is a no-op. That is what
+    lets the same rule run at more than one boundary without compounding.
+    """
+    if not value:
+        return value
+    if "://" in value:
+        return redact_url(value) or value
+    return redact(value) or value

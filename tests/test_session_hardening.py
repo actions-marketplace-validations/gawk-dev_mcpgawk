@@ -7,8 +7,6 @@ pinned here, including the eviction scenario that used to fail.
 """
 from __future__ import annotations
 
-import importlib
-import json
 
 from mcpgawk import spool
 from mcpgawk import guard_hook
@@ -65,7 +63,8 @@ def test_session_id_accepts_common_variants():
 def test_summarise_counts_missing_session_identity(tmp_path):
     target = str(tmp_path / "calls.jsonl")
     spool.append(_row("A"), path=target)
-    no_id = _row("A"); no_id["session"] = None
+    no_id = _row("A")
+    no_id["session"] = None
     spool.append(no_id, path=target)
     assert spool.summarise(path=target)["no_session"] == 1
 
@@ -73,7 +72,8 @@ def test_summarise_counts_missing_session_identity(tmp_path):
 def test_status_reports_no_session_calls(tmp_path, monkeypatch):
     target = str(tmp_path / "calls.jsonl")
     monkeypatch.setenv(spool.SPOOL_ENV, target)
-    no_id = _row("A"); no_id["session"] = None
+    no_id = _row("A")
+    no_id["session"] = None
     spool.append(no_id, path=target)
     from mcpgawk import status as status_mod
     text = status_mod.collect_and_render()

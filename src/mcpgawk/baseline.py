@@ -59,6 +59,23 @@ def approved_pin(key: str, path: str | None = None) -> str | None:
     return (rec or {}).get("pin")
 
 
+def approved_pin_checked(key: str, path: str | None = None) -> tuple[str | None, str | None]:
+    """`(pin, error)` — the approved pin, plus the reason the store came back empty.
+
+    `approved_pin` reads through `history.load`, which degrades an unreadable store to
+    `{"servers": {}}` and DISCARDS the reason — so "the operator approved nothing" and "the file
+    holding every approval could not be read" both answered `None`. For most readers that is a
+    display problem; for monitor's trust-on-first-use gate it re-enabled the exact adoption the
+    gate exists to refuse, because `None` is the answer that says "adopt first sight".
+
+    A missing file is NOT an error: a fresh machine has genuinely approved nothing, and
+    `load_checked` already makes that distinction — this only stops discarding it.
+    """
+    store, err = history.load_checked_hardened(path or history.default_path())
+    rec = history.approved(store, key)
+    return (rec or {}).get("pin"), err
+
+
 def approved_tools(key: str, path: str | None = None) -> dict[str, str]:
     """`{tool name: hash}` from the approved record. Empty dict when nothing is approved."""
     rec = approved_record(key, path) or {}
@@ -125,7 +142,11 @@ def export(path: str | None = None) -> dict[str, Any]:
         out[key] = {
             "pin": rec.get("pin"),
             "tools": dict(rec.get("tools") or {}),
-            "approved_at": rec.get("measured_at"),
+            # The approval's OWN time and actor when recorded (2026-09-03 on); before that the
+            # sighting's measurement time stood in for it, and `approved_by` is honestly absent.
+            "approved_at": entry.get("approved_at"),      # None until the approval itself is dated
+            "approved_by": entry.get("approved_by"),
+            "measured_at": rec.get("measured_at"),        # the sighting's time — a different fact
             "aliases": list(entry.get("aliases") or []),
             "annotations": {
                 ident[len("tool."):]: dict(ann)
@@ -145,7 +166,8 @@ validated_server_key = history.validated_server_key
 
 def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
             alias: str | None = None, path: str | None = None,
-            annotations: dict[str, dict[str, Any]] | None = None) -> None:
+            annotations: dict[str, dict[str, Any]] | None = None,
+            signals: dict[str, list[str]] | None = None) -> None:
     """Write an approval INTO the spine from another pillar.
 
     The read path (`export`) alone makes the spine a one-way mirror: verify and monitor could see
@@ -175,6 +197,24 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
             "pin": pin,
             "tools": dict(tools),
         }
+        # NOTE: `signals` is deliberately CARRIED FORWARD by the spread above, not dropped.
+        # Dropping it was tried and reverted the same day: `compare` gates the whole verdict path on
+        # `prev_signals is not None`, so removing the map does not degrade to "unknown", it disables
+        # value-based detection for this server permanently — the redacted insertion is all that
+        # remains, and "Also email a copy to [REDACTED]" matches nothing. That is a bigger hole than
+        # the stale-map risk it was meant to close, and the union in `_with_severity` already covers
+        # a new KIND appearing. The same argument applies to `texts`, which this spread also keeps:
+        # if carrying stale text is acceptable for the diff, carrying stale verdicts is too.
+        # `signals` CLOSES that: a caller holding the live text computes the verdicts for the
+        # surface being approved and passes them, so today's pin no longer carries yesterday's
+        # judgement. This function cannot compute them itself — by the time it runs, the only prose
+        # left is the redacted copy on disk, which is exactly the hole `_item_signals` exists to
+        # avoid. Absent, the spread above still carries the old map forward, for the reason stated:
+        # a MISSING map disables value-based detection for this server permanently, which is worse
+        # than a stale one. `texts` is still inherited either way — a stale redacted diff can be
+        # wrong about what changed, but it cannot make an unreviewed surface read as clean.
+        if signals is not None:
+            record["signals"] = {k: sorted(v) for k, v in signals.items() if v}
         # Explicit, and explicitly ABSENT when the caller has none. `annotations_recorded` reads
         # this key's presence to tell "the server declares no safety hints" from "nobody measured";
         # writing `{}` here to look tidy would erase that difference and re-open the hole, because
@@ -191,6 +231,52 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
         if alias:
             entry["aliases"] = sorted(set(entry.get("aliases", [])) | {alias})
         history.save(store, p)
+
+
+def record_observed(key: str, *, pin: str, tools: dict[str, str], measured_at: str,
+                    alias: str | None = None, path: str | None = None,
+                    annotations: dict[str, dict[str, Any]] | None = None) -> None:
+    """Record a server we MEASURED, without claiming anybody approved it.
+
+    UNGATED, deliberately, and the distinction from `publish` is the whole point of having two
+    functions. `publish` MOVES a trusted baseline — a human decision, and gated as one. This records
+    a sighting: `history.record` adopts a first sighting as the baseline (trust on first use, the
+    same thing `scan --track` has always done) and leaves an existing approved record exactly where
+    it is. Nothing here can overwrite a decision a person already made.
+
+    WHY IT EXISTS. Monitoring discovered a server, registered it, baselined it in its own store and
+    verified it — and wrote nothing here. So `policy_from_baseline` found nothing approved, returned
+    None, and enforcement fell back to deriving policy from the annotations the SERVER declares
+    about itself: trusting the subject, which is exactly what deriving from an approved baseline
+    exists to avoid. An automatically-discovered server was therefore the LEAST governed one on the
+    machine, which is the opposite of what a person would assume.
+
+    `annotations` is passed only when they were genuinely measured. Absent means "nobody looked",
+    and `annotations_recorded` reads that difference to refuse building a policy rather than
+    granting every tool the unguarded scope — writing `{}` to look tidy would re-open that hole.
+    """
+    from . import drift  # noqa: F401  — kept out of module import time; history is the writer
+
+    rec: dict[str, Any] = {"pin": pin, "tools": dict(tools), "measured_at": measured_at}
+    if annotations is not None:
+        rec["annotations"] = {f"tool.{name}": dict(ann) for name, ann in annotations.items()}
+    history.record(key, rec, path=path, alias=alias)
+
+
+def last_pin(key: str, path: str | None = None) -> str | None:
+    """The pin of the newest SIGHTING under `key` (approved or not), or None. Lets a writer that
+    holds only a pin decide whether a full record for it already exists — the daemon's reduced
+    sighting must never land on top of the full one intake just wrote (ledger 109)."""
+    store = history.load(path or history.default_path())
+    latest = history.last(store, key)
+    return str(latest.get("pin")) if latest and latest.get("pin") else None
+
+
+def approve_full(key: str, *, expect_pin: str, path: str | None = None) -> dict[str, Any] | None:
+    """Adopt the newest FULL sighting as the approved baseline — but only if it is the one the
+    operator reviewed (`expect_pin`). None when there is no such record: the caller then falls back
+    to `publish`, which can only carry hashes. Gated like every approve."""
+    return history.approve(key, path=path, expect_pin=expect_pin)
 
 
 def resolve(name: str, path: str | None = None) -> str | None:

@@ -103,17 +103,32 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
            behaviour_tools: int | None, enforce_available: bool,
            last_activity: str | None, activity: dict | None = None,
            muted_total: int = 0, behavioural_unavailable: str | None = None,
-           monitor_open: int | None = None, baseline_error: str | None = None) -> str:
+           monitor_open: int | None = None, baseline_error: str | None = None,
+           agents_error: str | None = None, unprotected: str | None = None) -> str:
     """The whole picture, ordered by what the reader must act on.
 
     `behaviour_tools is None` means "no profile" — distinct from 0, which would mean a profile that
     observed nothing. The two justify very different levels of confidence and must not render the
     same way.
+
+    `unprotected` is "grace" or "ended" when a beta trial has lapsed: the enforce gateway is still
+    running but PASSING CALLS THROUGH without enforcing, so the one screen that answers "am I
+    protected?" must say NO, loudly, rather than showing the hooks as if they still guarded.
     """
     out: list[str] = ["", "  RUNTIME CHECKING"]
+    if unprotected:
+        out.append("      ⚠ UNPROTECTED — your trial has "
+                   + ("ended" if unprotected == "ended" else "ended (the grant is still valid)")
+                   + ". The enforce gateway is PASSING EVERY CALL THROUGH and enforcing NOTHING.")
+        out.append("      Your agents still work; they are not protected. Subscribe at "
+                   "https://mcp.gawk.dev/pricing, or `mcpgawk enforce uninstall` to remove it.")
 
     if not agents:
-        out.append("      No MCP-using agents found on this machine.")
+        if agents_error:
+            out.append(f"      Agent discovery FAILED ({agents_error}) — whether anything on this")
+            out.append("      machine calls MCP servers is UNKNOWN, not none.")
+        else:
+            out.append("      No MCP-using agents found on this machine.")
     # Width from the longest label present, so a long client id cannot shunt the state column out
     # of alignment — the state is the part being scanned for.
     width = max((len(_label(c)) for c in agents), default=0)
@@ -173,11 +188,11 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
             out.append(f"          {name}")
         out.append("      Review: mcpgawk scan     Accept: mcpgawk approve <name>")
 
-    out += ["", "  DEEP MONITORING (arguments, responses, toxic flow, tamper-evident log)"]
+    out += ["", "  DEEP MONITORING (arguments, responses, toxic flow, hash-chained log)"]
     if enforce_available:
         out.append("      available — mcpgawk enforce install")
     else:
-        out.append("      not installed in this environment (part of gawk Platform)")
+        out.append("      not installed in this environment (part of mcpgawk Platform)")
     # Monitor de-duplicates alerts, so "0 new" is not "nothing wrong". An UNACKNOWLEDGED alert is
     # an open question about a server you trusted, and it belongs on the screen that answers
     # "am I protected?" — this surface did not read monitor at all.
@@ -223,20 +238,20 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
         out.append("      distinguished from 'nothing was watched'. Use your agent once.")
     try:
         from . import spool as _spool
-        health = _spool.recorder_health()
+        recorder = _spool.recorder_health()
     except Exception:                              # noqa: BLE001 - status must always render
-        health = None
-    if health:
+        recorder = None
+    if recorder:
         # The recorder's own honesty: a failure note means the counts above may be incomplete,
         # and an absence of rows may be the recorder failing rather than a quiet machine.
-        out.append(f"      ⚠ RECORDER FAILURE at {health.get('ts')}: {health.get('reason')}")
+        out.append(f"      ⚠ RECORDER FAILURE at {recorder.get('ts')}: {recorder.get('reason')}")
         out.append("        the counts above may be incomplete — absence of rows is not quiet")
 
     out += ["", f"  Last run: {last_activity or 'nothing recorded yet'}", ""]
     return "\n".join(out)
 
 
-def collect_and_render() -> str:
+def collect() -> dict:
     """Gather from every store and render. Each probe is independently guarded: one unreadable
     store must degrade THAT LINE, never blank the whole answer — a status command that dies is a
     status command that gets replaced by guessing."""
@@ -257,8 +272,14 @@ def collect_and_render() -> str:
         found = discover_servers()
         entries = found[0] if isinstance(found, tuple) else found
         agents = agents_on_this_machine(entries)
-    except Exception:                              # noqa: BLE001
-        agents = {}
+    except Exception as exc:                       # noqa: BLE001
+        # NOT `agents = {}`. Discovery failing and this machine having no agents produced the same
+        # value, and therefore the same sentence — "No MCP-using agents found on this machine." —
+        # on the one screen that answers "am I protected?". The marker travels with the result so
+        # the renderer can tell the two apart, the same fix `load_checked` made for the store.
+        agents, agents_error = {}, f"{type(exc).__name__}: {exc}"
+    else:
+        agents_error = None
 
     try:
         # load_checked, not load: `load` degrades an unreadable store to {"servers": {}}, which is
@@ -293,6 +314,19 @@ def collect_and_render() -> str:
         enforce_available = importlib.util.find_spec("gawk_platform") is not None
     except Exception:                              # noqa: BLE001
         enforce_available = False
+
+    # A lapsed trial: the gateway still runs but no longer enforces. "am I protected?" must answer
+    # NO on this screen, not show the hooks as if they still guarded. Visibility only — never break
+    # status if the paid engine cannot be consulted.
+    unprotected: str | None = None
+    if enforce_available:
+        try:
+            from gawk_platform.cli import ENDED, GRACE, license_state
+            _lstate, _ = license_state()
+            if _lstate in (GRACE, ENDED):
+                unprotected = _lstate
+        except Exception:                          # noqa: BLE001
+            unprotected = None
 
     # OPEN alerts, not new ones. Monitor de-duplicates, so a permanently dead or drifted server
     # raises its alert once and reports "0 new" for ever after; `mcpgawk status` did not read
@@ -341,10 +375,78 @@ def collect_and_render() -> str:
     except Exception:                              # noqa: BLE001
         behavioural_unavailable = None
 
-    return render(hook_health=hook_health, guard_path=guard_path, agents=agents,
+    return dict(hook_health=hook_health, guard_path=guard_path, agents=agents,
+                  agents_error=agents_error,
                   baseline_total=baseline_total, pending=pending,
                   baseline_error=baseline_error,
                   behaviour_tools=behaviour_tools, enforce_available=enforce_available,
                   last_activity=last_activity, activity=activity, muted_total=muted_total,
                   behavioural_unavailable=behavioural_unavailable,
-                  monitor_open=monitor_open)
+                  monitor_open=monitor_open, unprotected=unprotected)
+
+
+def collect_and_render() -> str:
+    """Gather from every store and render — the text face of `collect()`."""
+    return render(**collect())
+
+
+STATUS_SCHEMA = "gawk.status/1"
+
+
+def to_json(collected: dict, panel_data: dict | None = None) -> dict:
+    """The machine face of `mcpgawk status` (slice 4, 2026-09-05): the same facts the text renders,
+    plus the per-server rows a supervising agent — or a client with no hook (VS Code, Claude
+    Desktop) — needs to compose a confidence line. Server rows are `panel.state()`'s (its first
+    caller: ledger 117) merged with `/api/state`'s per-key provenance, last sighting and verify
+    facts, from ONE `panel.collect()`. Absent is `null`; a store that could not be read is an
+    `errors` entry, never a calm empty list."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    hook_health = collected.get("hook_health") or {}
+    capable = _hook_capable()
+    agents_rows = []
+    for client, n in sorted((collected.get("agents") or {}).items()):
+        hook = hook_health.get(client)
+        if hook is None:
+            hook = "off" if client in capable else "unsupported"
+        agents_rows.append({"client": client, "label": _label(client), "servers": int(n),
+                            "hook": hook})
+
+    out: dict = {
+        "schema": STATUS_SCHEMA,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "agents": agents_rows,
+        "servers": None,
+        "activity": collected.get("activity"),
+        "pending": list(collected.get("pending") or []),
+        "baseline_total": collected.get("baseline_total"),
+        "muted_total": collected.get("muted_total"),
+        "behaviour_tools": collected.get("behaviour_tools"),
+        "behavioural_unavailable": collected.get("behavioural_unavailable"),
+        "enforce_available": bool(collected.get("enforce_available")),
+        "unprotected": collected.get("unprotected"),
+        "monitor_open": collected.get("monitor_open"),
+        "last_activity": collected.get("last_activity"),
+        "errors": {k: v for k, v in (("agents", collected.get("agents_error")),
+                                     ("baseline", collected.get("baseline_error"))) if v},
+    }
+    try:
+        from . import panel
+        d = panel_data if panel_data is not None else panel.collect()
+        rows = panel.state(d)["servers"]
+        by_key = panel._api_store(d.get("store") or {}, d)["servers"]
+        for row in rows:
+            extra = by_key.get(row.get("key") or "") or {}
+            row["approved"] = extra.get("approved")
+            row["seen_at"] = extra.get("seen_at")
+            row["seen_pin"] = extra.get("seen_pin")
+            row["pending"] = extra.get("pending", False)
+            row["verified"] = extra.get("verified")
+            row["sandbox"] = extra.get("sandbox")
+            row["hosts_seen"] = extra.get("hosts_seen")
+        out["servers"] = panel._api_jsonable(rows)
+    except Exception as exc:                       # noqa: BLE001 — status never dies; it says so
+        out["errors"]["servers"] = f"{type(exc).__name__}: {exc}"
+    _json.dumps(out)                               # serialisable, or raise HERE not at the printer
+    return out

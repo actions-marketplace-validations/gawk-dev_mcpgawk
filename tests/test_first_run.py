@@ -13,7 +13,6 @@ put a first-time user off turned up immediately, and neither was visible from an
 from __future__ import annotations
 
 import asyncio
-import os
 
 from mcpgawk import consent
 from mcpgawk.probe import _stderr_tail, probe_stdio
@@ -68,6 +67,37 @@ def test_stderr_tail_is_empty_when_the_server_said_nothing():
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as fh:
         fh.write("\n   \n")
         assert _stderr_tail(fh) == ""
+
+
+# --- ledger 114: the two failure causes the registry crawl saw most get a next step ------------- #
+
+def test_uvs_own_from_line_is_quoted_verbatim_as_the_hint():
+    from mcpgawk.probe import _cause_hint
+    detail = ("error: Failed to spawn: `truesignal` ⏎   Caused by: No such file or directory ⏎ "
+              "Use `uvx --from truesignal-cli truesignal-mcp` instead.")
+    assert _cause_hint(detail) == "Use `uvx --from truesignal-cli truesignal-mcp` instead."
+
+
+def test_the_fastmcp_rename_gets_the_pin_or_migrate_hint():
+    from mcpgawk.probe import _cause_hint
+    hint = _cause_hint("Traceback ⏎ ModuleNotFoundError: No module named 'mcp.server.fastmcp'")
+    assert hint and "mcp<2" in hint and "mcp.server.mcpserver" in hint
+
+
+def test_an_unrecognised_cause_gets_no_invented_hint():
+    from mcpgawk.probe import _cause_hint
+    assert _cause_hint("Error: Cannot find module '/srv/dist/index.js'") is None
+    assert _cause_hint("") is None
+
+
+def test_the_hint_rides_on_the_real_probe_error_after_what_the_server_said():
+    snap = asyncio.run(probe_stdio(
+        "nosuchscript", "sh",
+        ["-c", "echo 'Use `uvx --from demo-cli demo-mcp` instead.' >&2; exit 1"], timeout=10))
+    assert snap.error and snap.error_kind == "server-failed"
+    said, _, hint = snap.error.partition(" — hint: ")
+    assert "the server said:" in said                       # the crawl's prefix, untouched
+    assert hint == "Use `uvx --from demo-cli demo-mcp` instead."
 
 
 # --- asked once means asked once ---------------------------------------------------------------- #
@@ -180,3 +210,38 @@ def test_a_capable_machine_is_not_nagged_about_degradation(monkeypatch, tmp_path
                         else real_which(name))
     out = collect_and_render()
     assert "UNAVAILABLE" not in out
+
+
+
+def test_stderr_tail_keeps_the_cause_above_the_log_path(tmp_path):
+    """mcpgawk-universe, 2026-09-04: the last line of a failed install is a log path, a closing
+    brace or a uv hint; the cause is lines above. One line kept left 5 of 25 failures
+    undiagnosable. Keep the tail, redacted line by line, and the cause survives."""
+    from mcpgawk.probe import STDERR_JOIN
+    errlog = tmp_path / "err.log"
+    errlog.write_text(
+        "npm notice New minor version of npm available\n"
+        "npm WARN EBADENGINE Unsupported engine { package: 'x', required: { node: '>=22' } }\n"
+        "npm WARN EBADENGINE }\n"
+        "npm error A complete log of this run can be found in: /work/npm/_logs/2026-09-04-debug-0.log\n",
+        encoding="utf-8")
+    with errlog.open("r+", encoding="utf-8") as fh:
+        detail = _stderr_tail(fh)
+    assert "required: { node: '>=22' }" in detail, "the cause must survive"
+    assert "debug-0.log" in detail, "and so must the log path"
+    assert "npm notice" not in detail
+    assert detail.count(STDERR_JOIN) == 2, "three real lines, two joins"
+
+
+def test_stderr_tail_is_bounded_and_redacted_per_line(tmp_path):
+    from mcpgawk.probe import STDERR_JOIN, STDERR_LINES_KEPT
+    errlog = tmp_path / "err.log"
+    lines = [f"line {i} " + "x" * 300 for i in range(50)]
+    lines.append("Authorization: Bearer sk-live-abcdefghijklmnopqrstuvwxyz0123456789")
+    errlog.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with errlog.open("r+", encoding="utf-8") as fh:
+        detail = _stderr_tail(fh)
+    parts = detail.split(STDERR_JOIN)
+    assert len(parts) == STDERR_LINES_KEPT, "only the tail"
+    assert all(len(p) <= 200 for p in parts), "each line capped, not only the whole"
+    assert "sk-live-abcdefghijklmnopqrstuvwxyz0123456789" not in detail, "redacted at capture"
