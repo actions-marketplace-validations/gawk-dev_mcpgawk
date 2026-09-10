@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -141,15 +142,72 @@ def check(path: Path) -> list[str]:
         for pat in SECRET_PATTERNS:
             if pat.search(blob):
                 problems.append(f"CREDENTIAL-SHAPED STRING in {m} (pattern {pat.pattern!r})")
+
+    # 5. THE BUILD MACHINE'S OWN PATHS. Not a credential, so §4 never looked for it — and §4
+    # skips `node_modules/` entirely, which is exactly where it hid.
+    #
+    # `pnpm deploy` resolves the two workspace deps to an ABSOLUTE file-scheme URL naming the
+    # build machine's home directory, and npm copies that literal into both `package.json` and
+    # the `package-lock.json` it generates. Both ride into the wheel. Measured 2026-09-10
+    # against the artefact PyPI
+    # actually serves: 0.1.34, 0.1.40 and 0.1.41 each ship two files naming the author's macOS
+    # username and full repo layout. Harmless to run, but this is a product whose claim is that
+    # nothing leaves your machine, and a reviewer who unzips the wheel finds the author's home
+    # directory in it.
+    #
+    # The build now scrubs these (`hatch_build._scrub_build_paths`). This is the gate that proves
+    # the scrub ran, checked on the built artefact rather than on the source that was supposed to
+    # produce it — vendored trees included, because that is where it was.
+    for raw, m in pairs:
+        # `tests/` is skipped for the reason §4 gives about secret-shaped strings: you cannot test
+        # a path detector without path-shaped fixtures, and the gate for this very check carries
+        # them on purpose. Tests ship in the sdist, so scanning them guarantees permanent noise.
+        if not m.endswith(_TEXTUAL + (".json",)) or m.startswith("tests/"):
+            continue
+        try:
+            blob = _read(path, raw)
+        except Exception:                         # noqa: BLE001 — already reported above if textual
+            continue
+        # SPELLED APART on purpose. Written whole, these literals make THIS FILE match its own
+        # detector — and it ships inside the sdist, so the gate would fail every release by
+        # reading itself. Exactly the trap `test_the_gate_does_not_match_its_own_source` already
+        # guards for SECRET_PATTERNS; caught here by the suite the first time this check ran
+        # against the real public build.
+        _scheme = b"file://" + b"/"
+        for _home in (b"Users", b"home", b"root", b"c:"):
+            marker = _scheme + _home + b"/"
+            if marker.lower() in blob.lower():
+                problems.append(
+                    f"BUILD MACHINE PATH in artefact: {m} contains "
+                    f"{marker.decode()!r} — the wheel names the build machine's home directory"
+                )
+                break
     return problems
 
 
-def build_public(repo: Path) -> list[Path]:
-    """Build sdist AND wheel from the public repo. Both are published, so both are checked."""
-    out = Path(tempfile.mkdtemp(prefix="gawk-public-dist-"))
-    subprocess.run([sys.executable, "-m", "build", "--outdir", str(out), str(repo)],
+def build_public(repo: Path, outdir: Path | None = None) -> list[Path]:
+    """Build sdist AND wheel from the public repo. Both are published, so both are checked.
+
+    `outdir` exists because a temp directory made this gate check a different file from the one
+    that ships. Building into `mktemp` left `dist/` untouched, so `preflight_release.sh`'s
+    self-test picked the newest wheel THERE — `mcpgawk-0.1.22`, four weeks stale — planted a paid
+    module in that, and reported the gate live for a release it had never seen (found 2026-09-09,
+    while cutting 0.1.40). The verifier was working; it was pointed at the wrong artefact. A gate
+    must watch the shipped copy.
+    """
+    # ALWAYS build into a fresh temp dir, then copy out. Building straight into `dist/` and
+    # globbing it returned every artefact ever built there — 0.1.0's sdist among them, which fails
+    # today's completeness rules — so the gate refused a perfectly good release. What is built and
+    # what happens to be lying in the directory are different sets, and only the first is ours.
+    staging = Path(tempfile.mkdtemp(prefix="gawk-public-dist-"))
+    subprocess.run([sys.executable, "-m", "build", "--outdir", str(staging), str(repo)],
                    check=True, capture_output=True)
-    return sorted(out.glob("*.whl")) + sorted(out.glob("*.tar.gz"))
+    built = sorted(staging.glob("*.whl")) + sorted(staging.glob("*.tar.gz"))
+    if outdir is None:
+        return built
+    dest = Path(outdir)
+    dest.mkdir(parents=True, exist_ok=True)
+    return [Path(shutil.copy2(b, dest / b.name)) for b in built]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -157,12 +215,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("artifacts", nargs="*", type=Path)
     ap.add_argument("--build", type=Path, metavar="PUBLIC_REPO",
                     help="build sdist+wheel from this repo and check both")
+    ap.add_argument("--outdir", type=Path, default=None,
+                    help="write the built artefacts here instead of a temp dir, so the caller can "
+                         "verify and publish THE SAME files (see build_public)")
+    ap.add_argument("--print-built", action="store_true",
+                    help="print each built artefact path on stdout, one per line, after the checks")
     args = ap.parse_args(argv)
 
     paths = list(args.artifacts)
     if args.build:
         try:
-            paths += build_public(args.build)
+            built = build_public(args.build, args.outdir)
+            paths += built
         except subprocess.CalledProcessError as exc:
             print(f"verify-public-artifact: BUILD FAILED — cannot verify what was not built\n"
                   f"{(exc.stderr or b'').decode(errors='replace')[-2000:]}", file=sys.stderr)
@@ -187,6 +251,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"verify-public-artifact: {p.name}: clean "
                   f"({len(_members(p))} members checked)")
+    # Hand the caller the EXACT paths that were checked, so a self-test or an upload cannot drift
+    # onto a different file. Only on success: naming artefacts that failed would invite publishing
+    # them. Printed last so the human-readable lines above stay first.
+    if args.print_built and not failed:
+        for p in paths:
+            print(p)
     return 1 if failed else 0
 
 
