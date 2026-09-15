@@ -1095,8 +1095,15 @@ def _changes(args) -> int:
               f"snapshot did not record which kinds it enumerated (written by wrap before 0.1.41 "
               f"or a scan before 0.1.40), so prompts and resources were not compared there.")
     if not found:
-        which = history.display_name(store, keys[0]) if len(keys) == 1 else f"{len(keys)} servers"
         n = sum(snapshots.values())
+        if not keys or n == 0:
+            # A fresh install. "No change recorded for 0 servers (0 snapshots)" is true and reads
+            # as nonsense; say what is actually missing and the one command that starts it.
+            print("No history yet. Run `mcpgawk scan` — every scan records a snapshot, and this "
+                  "screen compares them. Changes appear once a server's tools move between two "
+                  "snapshots.")
+            return 0
+        which = history.display_name(store, keys[0]) if len(keys) == 1 else f"{len(keys)} servers"
         print(f"No change recorded for {which} since {label} ({n} snapshot{'s' if n != 1 else ''})."
               + footer)
         return 0
@@ -1273,9 +1280,10 @@ ACCOUNT_COMMANDS = {
 #: reply must confirm they are in the right place and name the ONE missing step — never read as
 #: "you typed something wrong".
 _ACCOUNT_NEEDS_PLATFORM = (
-    "mcpgawk {cmd}: the mcpgawk Platform isn't installed in this environment yet.\n"
-    "Your licence unlocks it, and your purchase email has the one-line install command.\n"
-    "Lost it? https://mcp.gawk.dev/activate.html — or reply to the receipt and we'll resend.\n"
+    "mcpgawk {cmd}: the paid engine is not in this environment yet.\n"
+    "Your licence key is the one thing that adds it: run `mcpgawk login <license-key>` and the\n"
+    "engine is fetched, checksum-verified and put beside the free scanner in one step.\n"
+    "Lost the key? https://mcp.gawk.dev/trial.html — or reply to the email that carried it.\n"
     "The free scanner (`mcpgawk scan`) keeps working either way."
 )
 
@@ -1289,6 +1297,18 @@ def _run_account_command(command: str, rest: list[str]) -> int:
     try:
         from gawk_platform.cli import run_account
     except ImportError:
+        if command == "login":
+            # ONE path [FOUNDER 2026-09-12]: `mcpgawk login KEY` on a free install fetches the
+            # paid engine itself (token-gated, checksum-verified, installed where this
+            # interpreter lives) and re-runs login from the binary that now has it. `-h` prints
+            # the same usage the paid `login` prints; no key at all falls through to the message
+            # below, which is also what every other account command gets.
+            from . import engine_fetch
+            if rest and rest[0] in ("-h", "--help"):
+                print(engine_fetch.USAGE)
+                return 0
+            if rest and not rest[0].startswith("-"):
+                return engine_fetch.login_with_fetch(rest[0])
         print(_ACCOUNT_NEEDS_PLATFORM.format(cmd=command), file=sys.stderr)
         return 3
     return run_account(command, rest)
