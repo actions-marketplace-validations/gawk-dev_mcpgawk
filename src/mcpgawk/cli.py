@@ -1729,6 +1729,16 @@ def _record_sighting(sn, m, *, now: str, collided=frozenset(),
         # baseline does not carry over" would be a false alarm that fires once for every
         # credentialled server on upgrade, and it would be untrue.
         was = None
+    elif was is not None and history.same_surface(store, was, current):
+        # AUTH STATE IS NOT A RENAME (measured on the founder's kite, 2026-09-15). A remote not
+        # signed in advertises no `serverInfo.name`, so it keys by config name (`stdio:kite`)
+        # rather than its asserted name (`mcp:Kite MCP Server`) and `identity_change` sees a "new"
+        # server. But the tool surface is identical to the approved baseline (same pin), so nothing
+        # was rug-pulled behind the changed name. Carry the baseline over and stay silent about
+        # identity. A rename WITH a changed surface (a different pin) is NOT caught here and still
+        # fires the alarm below — the pin equality is the whole discriminator.
+        migrate_keys = migrate_keys + (was,)
+        was = None
     # `alias` names the record for an AD-HOC target (`_adhoc_name`); a config scan's label IS
     # the config name, so the default stands there.
     previous = history.record(key, current, migrate_from=migrate_keys, alias=alias or sn.name)

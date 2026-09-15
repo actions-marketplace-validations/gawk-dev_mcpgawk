@@ -5484,9 +5484,10 @@ def _monitor_start_button(mon: dict[str, Any]) -> str:
 
 def _monitor_pane(mon: dict[str, Any]) -> str:
     """The Monitor tab. What is watched, when it was last checked, and what is unresolved."""
-    frame = ('<div class="note">Monitoring re-checks each approved server on a schedule and '
-             'raises an alert when its surface moves — the rug-pull case, where a server you '
-             'already trusted changes after you approved it.</div>')
+    frame = ('<div class="note">Monitoring re-checks the servers it holds a baseline for on a '
+             'schedule and raises an alert when a surface moves — the rug-pull case, where a server '
+             'you already trusted changes after you approved it. A server that needs a sign-in '
+             'before it can be scanned is listed as pending, not raised as an alert.</div>')
     if not mon.get("installed"):
         return frame + ('<div class="note">Continuous monitoring ships with mcpgawk Platform — not '
                         'installed in this environment.</div>')

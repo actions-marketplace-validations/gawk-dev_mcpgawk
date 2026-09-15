@@ -935,6 +935,30 @@ def approved(store: dict[str, Any], key: str) -> dict[str, Any] | None:
     return hist[0] if hist else None
 
 
+def same_surface(store: dict[str, Any], key: str, rec: dict[str, Any]) -> bool:
+    """True when the APPROVED baseline under `key` carries the same tool-surface pin as `rec`.
+
+    The pin is the rug-pull anchor: an identical pin means the tools, their schemas and their
+    descriptions are the exact surface a human approved. A server that re-identifies (lands on a
+    new store key) while presenting that same surface has not rug-pulled — there is nothing changed
+    to hide behind the new name — so its baseline may carry over rather than being treated as an
+    unreviewed stranger. A missing baseline, a missing pin on either side, or a differing pin all
+    return False, so the caller falls back to the honest "different server" path. This is the
+    discriminator that separates an auth-state change (kite signed out advertises no name, so it
+    keys by config name) from a genuine rename-evasion (a new name AND a changed surface).
+
+    Compares the pin only, not `pin_basis`: a baseline minted under an older pin RULE has a
+    different pin for an identical surface, so this returns False and the caller keeps the alarm.
+    That is the conservative direction (a false "different server" on a rule upgrade, never a
+    suppressed rename), so it is left as-is rather than reaching across bases.
+    """
+    base = approved(store, key)
+    if not isinstance(base, dict):
+        return False
+    prior, now = base.get("pin"), rec.get("pin")
+    return bool(prior) and prior == now
+
+
 def _migrate(store: dict[str, Any], key: str, legacy_keys: tuple[str, ...],
              alias: str | None = None) -> bool:
     """Move a pre-existing baseline onto `key` when the identity scheme changed underneath it.
