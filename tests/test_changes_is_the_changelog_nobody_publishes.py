@@ -240,6 +240,17 @@ def test_no_server_means_every_server(store, capsys):
     assert rc == 0 and "srv" in out and "rotate_key" in out, out
 
 
+def test_a_fresh_install_says_what_is_missing_not_zero_of_zero(tmp_path, monkeypatch, capsys):
+    """Measured on the released 0.1.44: an empty store printed "No change recorded for 0 servers
+    since … (0 snapshots)". True, and nonsense to the person who just installed it. The first
+    thing a tester sees from this screen must name the one command that starts the history."""
+    monkeypatch.setenv(history.STORE_ENV, str(tmp_path / "history.json"))
+    rc, out = _run(capsys)
+    assert rc == 0
+    assert "No history yet" in out and "mcpgawk scan" in out, out
+    assert "0 servers" not in out and "0 snapshots" not in out, out
+
+
 def test_unknown_name_exits_2(store, capsys):
     rc, _ = _run(capsys, "nope")
     assert rc == 2
