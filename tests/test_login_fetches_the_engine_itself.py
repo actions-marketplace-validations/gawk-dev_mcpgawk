@@ -70,15 +70,18 @@ def free_install(monkeypatch, tmp_path):
     monkeypatch.setattr(engine_fetch, "_post", net.post)
     monkeypatch.setattr(engine_fetch, "_get", net.get)
     runs: list[list[str]] = []
+    captures: list[bool] = []             # whether each _run was asked to hold its output
     installed: list[bytes] = []          # the wheel's bytes AS THE INSTALLER SAW THEM (it is deleted after)
 
-    def run(argv):
+    def run(argv, capture=False):
         runs.append(list(argv))
+        captures.append(capture)
         if argv[-1].endswith(".whl"):
             installed.append(Path(argv[-1]).read_bytes())
         return 0
 
     monkeypatch.setattr(engine_fetch, "_run", run)
+    net.captures = captures
     monkeypatch.setattr(engine_fetch, "_download_dir", lambda: tmp_path)
     net.installed = installed
     return net, runs
@@ -99,6 +102,8 @@ def test_login_on_a_free_install_fetches_verifies_installs_and_reexecs(free_inst
     assert install[-1].endswith("mcpgawk-9.9.9-py3-none-any.whl") and net.installed == [WHEEL_BYTES]
     assert not Path(install[-1]).exists(), "the downloaded wheel was left on disk after install"
     assert reexec[-2:] == ["login", KEY], reexec
+    # the install runs CAPTURED (chatter held), the re-exec STREAMS (the user sees login's output)
+    assert net.captures == [True, False], net.captures
     assert "installed" in out.lower()
 
 
@@ -154,7 +159,7 @@ def test_a_download_that_fails_midway_says_so_and_exits_4(free_install, capsys):
 
 def test_an_installer_that_exits_nonzero_never_reexecs_and_never_says_installed(free_install, monkeypatch, capsys):
     net, runs = free_install
-    monkeypatch.setattr(engine_fetch, "_run", lambda argv: (runs.append(list(argv)), 1)[1])
+    monkeypatch.setattr(engine_fetch, "_run", lambda argv, capture=False: (runs.append(list(argv)), 1)[1])
     rc = cli.main(["login", KEY])
     out = capsys.readouterr()
     text = (out.out + out.err).lower()
@@ -222,3 +227,15 @@ def test_the_request_body_is_exactly_what_the_endpoint_reads():
     """`license-status.js` reads `licenseKey` and `want`. A renamed field would be a 400 in prod
     and a green suite here — so the shape is pinned as data, not as a mock."""
     assert json.loads(engine_fetch.request_body(KEY)) == {"licenseKey": KEY, "want": "engine"}
+
+
+def test_the_installer_is_quiet_on_success_and_shows_its_output_on_failure(capsys):
+    """The chatter fix: with capture=True a successful install prints nothing (uv's package list
+    and PATH warning stay out of the two login success lines), and a FAILED one shows exactly what
+    the child said, because that is what a broken install needs to surface."""
+    rc = engine_fetch._run([sys.executable, "-c", "print('INSTALLER-CHATTER')"], capture=True)
+    out = capsys.readouterr()
+    assert rc == 0 and "INSTALLER-CHATTER" not in (out.out + out.err), "chatter leaked on success"
+    rc = engine_fetch._run([sys.executable, "-c", "import sys; print('BOOM'); sys.exit(2)"], capture=True)
+    out = capsys.readouterr()
+    assert rc == 2 and "BOOM" in (out.out + out.err), "a failed install must show its output"

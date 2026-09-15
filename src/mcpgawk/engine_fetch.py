@@ -69,8 +69,19 @@ def _get(url: str) -> bytes:
         return resp.read()
 
 
-def _run(argv: list[str]) -> int:
-    return subprocess.run(argv, check=False).returncode
+def _run(argv: list[str], capture: bool = False) -> int:
+    """Run argv. With capture=True the child's output is held and shown ONLY if it fails: the
+    installer's progress chatter (uv's package list, its "not on PATH" warning) has no place
+    between the two success lines of a login, but its error is exactly what a failed install must
+    show. Without capture the child streams, which is what the re-exec of `login` wants."""
+    if not capture:
+        return subprocess.run(argv, check=False).returncode
+    proc = subprocess.run(argv, check=False, capture_output=True, text=True)
+    if proc.returncode != 0:
+        out = ((proc.stdout or "") + (proc.stderr or "")).rstrip()
+        if out:
+            print(out, file=sys.stderr)
+    return proc.returncode
 
 
 def _download_dir() -> Path:
@@ -158,7 +169,7 @@ def login_with_fetch(key: str) -> int:
 
     argv = install_argv(dest)
     print(f"  installing into {sys.prefix} …", flush=True)
-    rc = _run(argv)
+    rc = _run(argv, capture=True)     # quiet on success; the installer's chatter is not the login's
     try:
         dest.unlink()
     except OSError:
