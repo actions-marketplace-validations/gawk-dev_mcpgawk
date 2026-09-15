@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -97,7 +98,9 @@ def _own_binary() -> str:
 
 
 USAGE = (
-    "usage: mcpgawk login <license-key>\n\n"
+    "usage: mcpgawk login '<license-key>'\n\n"
+    "Wrap the key in single quotes: it carries | characters, which your shell would read as a\n"
+    "pipe and split the key at the first one.\n\n"
     "Your key is the only thing you add. With it, `login` fetches the paid engine (pre-built,\n"
     "checksum-verified, gated on the key), installs it beside the free scanner, and saves the key\n"
     "so the paid capabilities unlock. Lost the key? https://mcp.gawk.dev/trial.html or reply to\n"
@@ -105,14 +108,31 @@ USAGE = (
 )
 
 
+_BETA_SHAPE = re.compile(r"^gawk-beta\..+\.[0-9a-f]{32}$")   # greedy: a name may contain a dot
+
+
+def looks_truncated(key: str) -> bool:
+    """A beta grant ends in `.<32 hex>`. A key that lost its tail — pasted unquoted, the shell split
+    an old `|`-bodied key at the first pipe; or hand-copied short — reaches `login` without a
+    signature section. Caught HERE, before any network call, with the one fix named. The body is
+    matched greedily because a tester's name may contain a dot (the paid verifier uses rpartition
+    for the same reason)."""
+    return key.startswith("gawk-beta.") and not _BETA_SHAPE.match(key)
+
+
 def login_with_fetch(key: str) -> int:
     """Fetch → verify → install here → re-exec `mcpgawk login KEY` from the new binary."""
+    if looks_truncated(key):
+        print("mcpgawk login: that key is incomplete — a grant ends in `.<32 hex characters>` and this "
+              "one does not — it was cut short in the paste. Run it again with the whole key, in single "
+              "quotes:  mcpgawk login 'gawk-beta.…'", file=sys.stderr)
+        return EXIT_NOT_ELIGIBLE
     print("Fetching the paid engine with your key (pre-built, checksum-verified) …", flush=True)
     status, body = _post(ENDPOINT, json.loads(request_body(key)))
     if status == 403:
         print("mcpgawk login: this key does not unlock the engine (it is not on a live trial or "
               "licence). Request a trial at https://mcp.gawk.dev/trial.html, or check the key "
-              "you pasted.", file=sys.stderr)
+              "you pasted — the whole key, in single quotes.", file=sys.stderr)
         return EXIT_NOT_ELIGIBLE
     if status != 200 or not all(body.get(k) for k in ("url", "filename", "sha256")):
         print(f"mcpgawk login: the engine download is not available right now (HTTP {status}). "

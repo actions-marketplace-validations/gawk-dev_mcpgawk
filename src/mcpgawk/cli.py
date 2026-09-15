@@ -1281,8 +1281,9 @@ ACCOUNT_COMMANDS = {
 #: "you typed something wrong".
 _ACCOUNT_NEEDS_PLATFORM = (
     "mcpgawk {cmd}: the paid engine is not in this environment yet.\n"
-    "Your licence key is the one thing that adds it: run `mcpgawk login <license-key>` and the\n"
-    "engine is fetched, checksum-verified and put beside the free scanner in one step.\n"
+    "Your licence key is the one thing that adds it: run `mcpgawk login '<license-key>'` and the\n"
+    "engine is fetched, checksum-verified and put beside the free scanner in one step. The\n"
+    "quotes matter: the key carries | characters, which your shell would read as a pipe.\n"
     "Lost the key? https://mcp.gawk.dev/trial.html — or reply to the email that carried it.\n"
     "The free scanner (`mcpgawk scan`) keeps working either way."
 )
