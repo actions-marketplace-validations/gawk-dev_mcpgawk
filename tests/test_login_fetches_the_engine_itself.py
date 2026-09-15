@@ -35,7 +35,7 @@ import pytest
 
 from mcpgawk import cli, engine_fetch
 
-KEY = "gawk-beta.test.not-a-real-key"
+KEY = "gawk-beta.test|2026-09-22|2026-10-15." + "0123456789abcdef" * 2   # the real grant shape; not a real key
 WHEEL_BYTES = b"PK\x03\x04 not really a wheel, but bytes with a sha256"
 SHA = hashlib.sha256(WHEEL_BYTES).hexdigest()
 
@@ -190,12 +190,32 @@ def test_login_without_a_key_on_a_free_install_names_the_key_as_the_one_missing_
     monkeypatch.setitem(sys.modules, "gawk_platform.cli", None)
     rc = cli.main(["login"])
     err = capsys.readouterr().err
-    assert rc == 3 and "mcpgawk login <license-key>" in err, err
+    assert rc == 3 and "mcpgawk login '<license-key>'" in err, err
     assert "email has the one-line" not in err and "installed" not in err.lower(), err
     # -h on a free install prints usage and exits 0, exactly as the paid `login -h` does
     rc = cli.main(["login", "--help"])
     out = capsys.readouterr().out
-    assert rc == 0 and out.startswith("usage: mcpgawk login <license-key>"), out
+    assert rc == 0 and out.startswith("usage: mcpgawk login '<license-key>'"), out
+
+
+def test_a_key_the_shell_split_at_a_pipe_is_caught_before_any_network_call(free_install, capsys):
+    """The trial key is `gawk-beta.<name>|<date>|<date>.<32 hex>`. Pasted unquoted, the shell
+    splits it at the first `|` (measured 2026-09-15 on the released 0.1.45): `login` receives
+    `gawk-beta.<name>`. That must not reach the endpoint as a 403 that says "check the key" —
+    it must name the fix: single quotes."""
+    net, runs = free_install
+    rc = cli.main(["login", "gawk-beta.sri"])
+    out = capsys.readouterr()
+    text = (out.out + out.err).lower()
+    assert rc == 3 and net.posts == [] and runs == []
+    assert "single quotes" in text and "installed" not in text, text
+    # a complete grant of the right shape is NOT caught by the shape check
+    assert not engine_fetch.looks_truncated("gawk-beta.sri|2026-09-22|2026-10-15." + "a" * 32)
+    assert engine_fetch.looks_truncated("gawk-beta.sri|2026-09-22|2026-10-15")
+    # a name with a dot in it is a valid key, not a truncated one (the body is matched greedily)
+    assert not engine_fetch.looks_truncated("gawk-beta.j. doe|2026-09-22|2026-10-15." + "a" * 32)
+    # the shell-safe shape (v2, `_`-separated body) passes the same check
+    assert not engine_fetch.looks_truncated("gawk-beta.sri_2026-09-22_2026-10-15." + "a" * 32)
 
 
 def test_the_request_body_is_exactly_what_the_endpoint_reads():
