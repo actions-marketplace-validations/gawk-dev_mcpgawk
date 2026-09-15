@@ -3312,8 +3312,9 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
              # containerized the engine falls back to the proxy-only sandbox and the per-server
              # rows say so. The isolation column shows what actually ran, never the request.
              '<code>mcpgawk verify &lt;config.json&gt;</code> runs each server and reports what it '
-             'actually contacts. Free. Verify runs started here request container isolation '
-             '(needs Docker) and report per server when they had to run without it.</div>')
+             'actually contacts. Free, and it needs no Docker: each server runs in a proxy sandbox '
+             'that observes its egress. Docker, if you have it, adds full container isolation that '
+             'also blocks non-HTTP exfil — the per-server rows show which sandbox actually ran.</div>')
     errs = "".join(f'<div class="note warn">Could not read {_esc(k)}: {_esc(v)} — this panel is '
                    f'showing less than the whole picture.</div>'
                    for k, v in (d.get("errors") or {}).items())
