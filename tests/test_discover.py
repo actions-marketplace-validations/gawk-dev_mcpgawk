@@ -653,3 +653,31 @@ def test_a_plugin_and_a_client_config_with_the_same_url_but_different_headers_ar
     _write(tmp_path, ".claude.json", {"mcpServers": {"figma": {"url": "https://mcp.figma.com/mcp"}}})
     found = _discover(tmp_path)
     assert {"figma", "plugin_figma_figma"} <= set(found), sorted(found)
+
+
+def test_detect_unscannable_names_claudeai_connectors_from_ever_connected(tmp_path):
+    """The auth-needed cache only held `plugin:figma:figma`, so `claude.ai Gmail`/Drive/Calendar
+    were dropped entirely — a fleet list that silently omits write-capable account connectors
+    implies a completeness it does not have (measured 2026-09-16). detect_unscannable now also
+    reads `~/.claude.json` `claudeAiMcpEverConnected`, names each account-hosted, dedups against
+    the auth cache, and honours `exclude` (a name that is a scannable fleet server is not listed)."""
+    import json as _json
+    from mcpgawk.discover import detect_unscannable
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "mcp-needs-auth-cache.json").write_text(
+        _json.dumps({"plugin:figma:figma": {}}))
+    (tmp_path / ".claude.json").write_text(_json.dumps({
+        "claudeAiMcpEverConnected": ["claude.ai Gmail", "claude.ai Google Drive",
+                                     "claude.ai Google Calendar", "plugin:figma:figma"]}))
+
+    rows = detect_unscannable(home=tmp_path, platform="darwin")
+    by_name = {r["name"]: r for r in rows}
+    assert "claude.ai Gmail" in by_name, "Gmail was dropped again"
+    assert by_name["claude.ai Gmail"]["kind"] == "account-hosted"
+    assert "no local endpoint" in by_name["claude.ai Gmail"]["why"]
+    # deduped: figma is in both sources but appears once
+    assert sum(1 for r in rows if r["name"] == "plugin:figma:figma") == 1
+    # exclude wins: a name that is actually a scannable fleet server is not listed as unscannable
+    excl = detect_unscannable(home=tmp_path, platform="darwin", exclude={"claude.ai Gmail"})
+    assert "claude.ai Gmail" not in {r["name"] for r in excl}

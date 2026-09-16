@@ -590,6 +590,24 @@ def detect_unscannable(home: Path | str | None = None,
         found.append({"name": str(name), "kind": "account-hosted",
                       "why": "runs in your Anthropic account — no local endpoint to scan"})
 
+    # A WIDER source than the auth cache: Claude Code records every claude.ai connector that has
+    # EVER connected in `~/.claude.json` (`claudeAiMcpEverConnected`). The auth cache only holds the
+    # ones that left an auth-needed trace, so `claude.ai Gmail`/`Google Drive`/`Google Calendar`
+    # were dropped entirely while `plugin:figma:figma` showed (measured on the founder's machine,
+    # 2026-09-16). "Ever connected" can name one the user has since disabled — the safe direction:
+    # naming a stale connector is a smaller sin than silently omitting one they use daily. Still
+    # only NAMED, never measured; an account-hosted connector has no local endpoint to reach.
+    seen = {f["name"] for f in found}
+    ever = (_read_config(home_path / ".claude.json") or {}).get("claudeAiMcpEverConnected")
+    if isinstance(ever, list):
+        for name in ever:
+            n = str(name)
+            if n in seen or (exclude and n in exclude):
+                continue
+            seen.add(n)
+            found.append({"name": n, "kind": "account-hosted",
+                          "why": "runs in your Anthropic account — no local endpoint to scan"})
+
     hosts = {
         "darwin": "Library/Application Support/Google/Chrome/NativeMessagingHosts",
         "linux": ".config/google-chrome/NativeMessagingHosts",
