@@ -21,9 +21,12 @@ change what their tools do *after* you approved them, and the agent will call th
 noticing. mcpgawk reads every server your agents can reach, checks every call against a baseline
 you approved, and blocks the ones that changed. It runs on your machine and uploads nothing.
 
-The same engine powers **mcpgawk Platform**, which puts one endpoint in front of the whole fleet
-with a key per caller, policy on every call and a tamper-evident audit log. This free layer is the
-seeing and the blocking underneath it.
+The same engine powers **mcpgawk Platform**: `mcpgawk enforce` puts one endpoint in front of the
+whole fleet with a key per caller, policy on every call and a hash-chained audit log, and
+`mcpgawk monitor` watches the servers you approved around the clock and tells you when one drifts.
+This free layer is the seeing and the blocking underneath it. If you have a licence,
+`mcpgawk login <key>` fetches the paid engine and turns those on — the same install, one more
+command, nothing else to set up.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/gawk-dev/mcpgawk/main/assets/brand/demo.gif"
@@ -57,12 +60,17 @@ request, used or not.
   your agent's loop. The decision is local, in about 10ms, with nothing to sign in to. Works on **6 of
   the 21 supported clients**; the rest have no hook point and are named, not glossed over.
 - 🧪 **Run it, don't just read it** — `mcpgawk verify` drives tools in a sandbox and reports what they
-  did: exfiltration, SSRF, tool poisoning, secret leaks. Safe mode drives only provably read-only
-  tools, and every tool it skips is named as skipped.
+  did: exfiltration, SSRF, tool poisoning, secret leaks. The sandbox is a proxy by default, so it
+  needs no Docker; Docker adds full container isolation when you have it. Safe mode drives only
+  provably read-only tools, and every tool it skips is named as skipped.
 - 🧑‍⚖️ **Approval needs a person** — `mcpgawk decide` opens a local screen for what changed. The buttons
   live on the tokened link printed in your terminal, so an agent that opened the page cannot approve
   its own way past a block.
 - 🖥️ **One local panel** — `mcpgawk panel`: every server, every decision, every piece of evidence.
+- 📜 **The changelog no vendor publishes** — `mcpgawk changes` shows every change to a server's tool
+  surface between the snapshots you have recorded: tools added or removed, input schemas widened,
+  descriptions and annotations rewritten. It reads your local history, so it works for a server you
+  approved weeks ago — the one thing a fresh scan can never tell you.
 - 🔌 **Any transport** — stdio, streamable-HTTP, SSE, and OAuth remotes (via the `mcp-remote` bridge).
 - 💸 **Token cost index** — exactly what each tool adds to your context at connect, plus the 3 heaviest tools.
 - 🧾 **Capability facts** — write / exfil-capable / declared annotations, straight from the schema, plus a
@@ -109,6 +117,8 @@ mcpgawk guard status                     # is protection actually on?
 mcpgawk decide                           # what changed, and approve it as a human
 mcpgawk panel                            # the local page: servers, decisions, evidence
 mcpgawk verify mcp.json                  # run the servers and watch what they do
+mcpgawk changes                          # what changed on your servers since you approved them
+mcpgawk login <key>                      # licence? one command fetches the paid engine (enforce, monitor)
 ```
 
 Scanning on its own, if that is all you want:

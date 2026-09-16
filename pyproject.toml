@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [{ name = "Neelagiri" }]
-keywords = ["mcp", "model-context-protocol", "security", "tokens", "local-first", "llm", "agents", "tokenizer", "cli"]
+keywords = ["mcp", "model-context-protocol", "mcp-gateway", "post-approval-drift", "rug-pull", "prompt-injection", "agentic-ai", "ai-security", "supply-chain-security", "security", "local-first", "tokens", "llm", "agents", "cli"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -41,9 +41,10 @@ gateway = ["starlette>=0.40", "uvicorn>=0.30"]
 
 [project.urls]
 Homepage = "https://mcp.gawk.dev"
-Documentation = "https://mcp.gawk.dev"
+Documentation = "https://mcp.gawk.dev/docs"
 Repository = "https://github.com/gawk-dev/mcpgawk"
 Issues = "https://github.com/gawk-dev/mcpgawk/issues"
+Changelog = "https://github.com/gawk-dev/mcpgawk/releases"
 
 [project.scripts]
 mcpgawk = "mcpgawk.cli:main"
