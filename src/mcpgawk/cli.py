@@ -24,7 +24,7 @@ from . import configcheck, drift, fleet, history, runlog
 from .fleet import FleetRow
 from .consent import gate_stdio_consent
 from .discover import detect_unscannable, discover_report
-from .label import build_label, render_cli, render_summary
+from .label import build_label, lead_concern, render_cli, render_summary
 from .measure import measure
 from .oauth_scopes import inspect as inspect_oauth_scopes
 from .probe import ServerSnapshot, probe, probe_stdio, probe_url
@@ -2228,6 +2228,14 @@ def _dispatch(argv: list[str] | None = None) -> int:
                 print(drift.render(name, drift_reports[name]))
         print()
         print(fleet.render_fleet(rows))
+        # The per-server narrative is a deliberate --detail away here, so a multi-server overview
+        # would otherwise be a table with no "so what". One pointer at the server most worth
+        # opening, and its lead concern, turns the table into a next step without a wall of reports.
+        _lead = lead_concern(labels)
+        if _lead:
+            _lname, _ltitle = _lead
+            print(f"\n  → Look at {_lname} first: {_ltitle}.")
+            print(f"    Full read:  mcpgawk scan --detail   (or --only {_lname})")
         # Trust-on-first-use was silent, so the single most valuable thing a first scan does — start
         # a record — happened invisibly. Say it once, only for servers actually seen for the first
         # time, so it teaches the idea and then gets out of the way.
