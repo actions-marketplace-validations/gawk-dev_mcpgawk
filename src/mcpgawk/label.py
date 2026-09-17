@@ -61,6 +61,18 @@ _SIGNAL_LEAD = {
 #: JSON risk flag and the rendered verdict, so they cannot disagree.
 HEAVY_TOKENS = 3000
 
+#: The context window the connect-time cost is measured against. Named once so the concern, the
+#: cost sentence and every renderer cite the SAME window — it was the literal 200_000, written twice.
+CONTEXT_WINDOW = 200_000
+
+#: External reference points for the connect-time cost, from servers we have actually measured —
+#: distinct from cost_phrase's per-tool judgement, and an ABSOLUTE anchor a reader can hold onto.
+#: These lived in site/assets/report-render.js and were never wired to a renderer, so the web
+#: report could never say "heavier than the heaviest server we have measured". One place now, so no
+#: renderer can quote its own numbers.
+LEAN_BENCH = 3570    # Cloudflare — the leanest widely-used server measured
+HEAVY_BENCH = 23085  # the heaviest dev-tool MCP measured so far
+
 
 def _trust_surface(m: Measurement) -> dict[str, Any]:
     total = m.tool_count
@@ -138,6 +150,13 @@ def build_label(snap: ServerSnapshot, m: Measurement, measured_at: str | None = 
                 {"name": t.name, "tokens": t.tokens,
                  "write": t.write, "exfil_capable": t.exfil_capable,
                  "exfil_basis": t.exfil_basis or None,
+                 # Normalized declarations, per tool. An all-defaults annotation block is NOT a
+                 # declaration (measure.is_default_fill) — the same rule trust_surface applies to
+                 # destructive_declared_count — so a spec-default tuple never reads as "deletes".
+                 "destructive": (not is_default_fill(t.annotations)
+                                 and (t.annotations or {}).get("destructiveHint") is True),
+                 "read_only": (not is_default_fill(t.annotations)
+                               and (t.annotations or {}).get("readOnlyHint") is True),
                  "annotations": t.annotations or None}
                 for t in m.tools
             ],
@@ -295,7 +314,7 @@ def _concerns(n: int, cost: int, write_c: int, exfil_c: int, ac: dict[str, Any],
     # two lines above "it costs too much". Contradicting yourself in the same breath is exactly the
     # credibility loss this rewrite is meant to fix.
     if heavy and expensive:
-        pct = round(cost / 200_000 * 100)
+        pct = round(cost / CONTEXT_WINDOW * 100)
         body = [f"{cost:,} tokens are loaded before you type a word, whether or not you use a tool."]
         top = _dominates(tools, cost)
         if top:
@@ -305,31 +324,54 @@ def _concerns(n: int, cost: int, write_c: int, exfil_c: int, ac: dict[str, Any],
     return out
 
 
-def _flagged_table(tools: list[dict[str, Any]], n: int) -> list[str]:
-    """The tools behind the exposure, scariest first (can change data AND send it out), capped.
-    Only claims "BOTH" for tools that genuinely can do both — the header must never overclaim."""
-    flagged = sorted((t for t in tools if t["write"] or t["exfil_capable"]),
-                     key=lambda t: (0 if (t["write"] and t["exfil_capable"]) else 1 if t["write"] else 2,
-                                    -t["tokens"]))
+def flagged_surface(tools: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The write-/exfil-capable tools behind the exposure, scariest first, as STRUCTURE — not CLI
+    strings. build_narrative puts this on the narrative so the CLI table AND the web report name the
+    SAME tools with the SAME both-vs-either verdict. Before this the selection lived only inside the
+    CLI renderer, so the web report could show cost and bounded signals but never WHICH tools could
+    change data and send it out — the one line worth a screenshot.
+    Only marks `both` when a tool genuinely can do both — the header must never overclaim."""
+    flagged = sorted((t for t in tools if t.get("write") or t.get("exfil_capable")),
+                     key=lambda t: (0 if (t.get("write") and t.get("exfil_capable")) else 1 if t.get("write") else 2,
+                                    -t.get("tokens", 0)))
+    if not flagged:
+        return None
+    both = [t for t in flagged if t.get("write") and t.get("exfil_capable")]
+    shown = both[:5] if both else flagged[:5]
+    rows = [{"name": t["name"], "tokens": t.get("tokens", 0),
+             "write": bool(t.get("write")), "exfil": bool(t.get("exfil_capable")),
+             # A declared-destructive write is worse than a plain write — the report says "deletes
+             # or overwrites" rather than the generic "changes data" when the server declares it.
+             "destructive": bool(t.get("destructive")),
+             # `exfil` alone does not say WHY: a destination in the call (structural) or a word in
+             # the prose (weak). The flag carries the strength so neither renderer overstates it.
+             "exfil_structural": is_structural_basis(t.get("exfil_basis"))}
+            for t in shown]
+    return {"both": bool(both), "rows": rows,
+            "remaining": len(flagged) - len(shown), "total": len(flagged)}
+
+
+def _flagged_table(flagged: dict[str, Any] | None, n: int) -> list[str]:
+    """CLI renderer for the flagged-tool surface. It renders the structure build_narrative already
+    computed via flagged_surface(); it does not select. The web report renders the same structure,
+    so the two surfaces can never disagree about which tools are dangerous."""
     if not flagged:
         return []
-    both = [t for t in flagged if t["write"] and t["exfil_capable"]]
-    shown = both[:5] if both else flagged[:5]
     # Self-describing header: this table can follow any of the concerns, so a back-reference like
     # "the tools behind that" would point at whichever one happened to render last.
-    head = ("    The tools that can BOTH change data AND send it out:" if both
+    head = ("    The tools that can BOTH change data AND send it out:" if flagged["both"]
             else "    The tools that can change data or send it out:")
     out = ["", head]
-    for t in shown:
+    for r in flagged["rows"]:
         # A row must not wear the strong word for a weak reason. `exfil` here means a destination
         # is in the call; a prose match reads `wording?` so the row says which arm found it.
-        ex = "exfil" if is_structural_basis(t.get("exfil_basis")) else "wording?"
-        tag = (f"write + {ex}" if (t["write"] and t["exfil_capable"])
-               else ("write" if t["write"] else ex))
-        out.append(f"      · {t['name']:<32} {t['tokens']:>5} tok   {tag}")
-    remaining = len(flagged) - len(shown)
-    if remaining > 0:
-        out.append(f"      (+ {remaining} more that can change or send data · --verbose for all {n})")
+        ex = "exfil" if r["exfil_structural"] else "wording?"
+        wr = "delete" if r.get("destructive") else "write"
+        tag = (f"{wr} + {ex}" if (r["write"] and r["exfil"])
+               else (wr if r["write"] else ex))
+        out.append(f"      · {r['name']:<32} {r['tokens']:>5} tok   {tag}")
+    if flagged["remaining"] > 0:
+        out.append(f"      (+ {flagged['remaining']} more that can change or send data · --verbose for all {n})")
     return out
 
 
@@ -353,6 +395,20 @@ def _actions(exfil_c: int, write_c: int, ac: dict[str, Any], heavy: bool,
         acts.append(f"Treat the {_pl(write_c, 'write-capable tool')} as unreviewed — this server "
                     f"gives your agent no safety hints about {'it' if write_c == 1 else 'them'}.")
     return acts[:3]
+
+
+def cost_context(cost: int) -> str:
+    """An ABSOLUTE reference for the connect-time cost, against servers we have measured — distinct
+    from cost_phrase's per-tool judgement ("expensive for a server this size"). The engine owns this
+    sentence so the CLI and the web quote the same numbers; the web used to compute its own and drift."""
+    if cost <= LEAN_BENCH:
+        return (f"That is lighter than the leanest widely-used server we have measured "
+                f"(Cloudflare, {LEAN_BENCH:,} tokens).")
+    if cost >= HEAVY_BENCH:
+        return (f"That is heavier than the heaviest server we have measured so far "
+                f"({HEAVY_BENCH:,} tokens).")
+    return (f"That sits between the leanest widely-used server we have measured "
+            f"(Cloudflare, {LEAN_BENCH:,}) and the heaviest we have seen ({HEAVY_BENCH:,}).")
 
 
 def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
@@ -413,8 +469,10 @@ def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
             detail = "no MCP response (timed out)"
         failure = {"detail": detail, "auth": state == "auth-required"}
 
-    pct = round(cost / 200_000 * 100)
-    window = f"about {pct}% of a 200k context window" if pct >= 1 else "under 1% of a 200k context window"
+    pct = round(cost / CONTEXT_WINDOW * 100)
+    kw = CONTEXT_WINDOW // 1000
+    window = (f"about {pct}% of a {kw}k context window" if pct >= 1
+              else f"under 1% of a {kw}k context window")
     return {
         "verdict": verdict,
         "state": state,
@@ -422,7 +480,14 @@ def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
         "dispatch": has_dispatch,
         "cost_sentence": (f"{n} tool{'s' if n != 1 else ''} costing {cost:,} tokens — {window}, spent on "
                           f"every message before you type a word. {phrase.capitalize()}."),
+        # An absolute reference point, from measured servers — one sentence, engine-owned, so the
+        # CLI and the web quote the same numbers (the web used to carry its own and drift).
+        "cost_context": cost_context(cost),
         "concerns": [{"title": t, "body": b} for t, b in concerns],
+        # The named tools behind the exposure, as structure — the CLI table and the web report
+        # both render this, so they name the same tools with the same verdict. Gated on has_risk to
+        # match exactly when the CLI shows the table; None when nothing can change or send data.
+        "flagged": flagged_surface(tools) if has_risk else None,
         "actions": _actions(exfil_c, write_c, ac, heavy, tools, cost),
         # Hedged and conditional, always: we only saw the tools the server chose to show us, and we
         # only pattern-match. It disappears entirely the moment anything is actually found.
@@ -430,6 +495,29 @@ def build_narrative(label: dict[str, Any]) -> dict[str, Any]:
                         else f"Nothing here looks malicious in the {n} visible tool"
                              f"{'s' if n != 1 else ''} — this is exposure, not evidence of an attack."),
     }
+
+
+def lead_concern(labels: list[dict[str, Any]]) -> tuple[str, str] | None:
+    """On a multi-server overview the per-server narrative is deliberately behind --detail (three
+    full reports in a row go unread). So pick the ONE server most worth opening and its lead
+    concern — a single pointer into --detail, not a wall. None when nothing is in REVIEW."""
+    ranked: list[tuple[int, int, int, str, str]] = []
+    for lab in labels:
+        x = lab.get("x-mcpgawk") or {}
+        nar = x.get("narrative") or {}
+        if nar.get("state") != "review":
+            continue
+        concerns = nar.get("concerns") or []
+        if not concerns:
+            continue
+        both = 1 if (nar.get("flagged") or {}).get("both") else 0
+        # worst first: a tool that can BOTH change and send data, then more concerns, then cost.
+        ranked.append((both, len(concerns), int(x.get("cost_index_tokens", 0)),
+                       str(lab.get("name", "")), str(concerns[0].get("title", ""))))
+    if not ranked:
+        return None
+    ranked.sort(reverse=True)
+    return ranked[0][3], ranked[0][4]
 
 
 def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
@@ -501,6 +589,8 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
         # ── The narrative: what this server IS, what to look at first, what to do. ──────────────
         lines.append("")
         lines += _wrap(nar["cost_sentence"], "    ")
+        if nar.get("cost_context"):
+            lines += _wrap(nar["cost_context"], "    ")
 
         for i, (title, body) in enumerate(concerns):
             lines += ["", f"    ▸ {'Look at this first' if i == 0 else 'Also true'}"]
@@ -511,7 +601,7 @@ def render_cli(label: dict[str, Any], verbose: bool = False) -> str:
         # Supporting evidence sits directly under the concern it supports, before the advice —
         # claim, then proof, then what to do.
         if not verbose and has_risk:
-            lines += _flagged_table(tools, n)
+            lines += _flagged_table(nar.get("flagged"), n)
 
         actions = nar["actions"]
         if actions:
