@@ -300,7 +300,15 @@ def collect() -> dict:
 
     behaviour_tools: int | None = None
     try:
-        profile = Path.home() / ".gawk" / "behaviour.json"
+        # THROUGH behaviour_profile_path, never a hardcoded ~/.gawk — panel.py states that rule and
+        # decide.py copies it; this line was the copy that never got made. Measured 2026-09-18: with
+        # GAWK_BEHAVIOUR_PROFILE pointing at a profile holding 2 tools, `mcpgawk status` reported 29
+        # from ~/.gawk, because it read a file the rest of the product was not using. status is the
+        # screen that states what IS and is NOT protected, so it is the worst one to read the wrong
+        # file. Imported lazily, like cli.py and report.py do, and inside this try: if panel cannot
+        # be imported the count degrades to None ("no profile"), which is the contract already.
+        from .panel import behaviour_profile_path
+        profile = behaviour_profile_path()
         if profile.is_file():
             import json
             data = json.loads(profile.read_text(encoding="utf-8"))

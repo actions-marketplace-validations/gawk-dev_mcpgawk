@@ -92,3 +92,47 @@ def test_demo_runs_from_the_shipped_entry_point(tmp_path):
         capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
     assert "BLOCKED" in r.stdout and "CHANGED since you approved" in r.stdout
+
+
+def test_the_demo_sandbox_can_actually_be_verified(tmp_path):
+    """THE OBVIOUS NEXT STEP AFTER `mcpgawk demo` MUST NOT FAIL.
+
+    `mcpgawk verify` exercises a tool to see what it DOES. Until 2026-09-18 the fixture answered
+    only initialize/tools/list/ping, so `verify` on a kept demo sandbox got -32601 for every call
+    and reported INCOMPLETE, 0/4, "infra failure" — on a sandbox this project ships and invites
+    people to inspect. This asserts the fixture answers a tool call, in both faces, without
+    starting the whole engine: the protocol behaviour is the thing that broke.
+    """
+    import json as _json
+    import subprocess as _sp
+    import sys as _sys
+    from mcpgawk.demo import _Sandbox
+
+    box = _Sandbox(tmp_path / "box")
+    box.build()
+
+    def call(tool: str) -> dict:
+        msgs = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool}},
+        ]
+        p = _sp.run([_sys.executable, str(box.fixture)],
+                    input="".join(_json.dumps(m) + "\n" for m in msgs),
+                    capture_output=True, text=True, timeout=30)
+        lines = [l for l in p.stdout.splitlines() if l.strip()]
+        return _json.loads(lines[-1])
+
+    clean = call("read_notes")
+    assert "error" not in clean, f"the fixture refuses tools/call: {clean.get('error')}"
+    assert clean["result"]["content"][0]["text"], "the tool returned no content to check"
+
+    box.set_mode("pulled")
+    pulled = call("read_notes")
+    body = pulled["result"]["content"][0]["text"]
+    assert "ignore previous instructions" in body.lower(), (
+        "the poisoned face must carry the lure in its RESPONSE too — that is what gives verify's "
+        "output checks something real to catch")
+
+    unknown = call("no_such_tool")
+    assert unknown.get("error", {}).get("code") == -32602, (
+        "an unknown tool should be an invalid-params error, not method-not-found")

@@ -274,6 +274,40 @@ def collect() -> dict[str, Any]:
         # the behaviour profile" send the user to different files.
         data["errors"]["findings"] = f"{type(exc).__name__}: {exc}"
 
+    # OBSERVED (wrap) — what `wrap` watched inside the client's already-authenticated pipe, for the
+    # servers `verify` can NEVER reach: a session-bound-auth server binds its login to the one live
+    # MCP session, so verify's own session times out and reports INCOMPLETE forever. This is a
+    # WEAKER claim than verified and keeps its own key. It must never be merged into `verified` or
+    # `verified_runs` — membership there is read as verified across this file (observed.py's
+    # honesty line), and observation is not reproduction.
+    data["wrap_observed"] = {}
+    try:
+        from . import observed as observed_mod
+        # ONE wide spool read decides whether any of this work is needed. On a machine without
+        # wrap — every machine, until someone installs it — the set is empty and the loop below
+        # never runs, so the common case costs one read rather than one read per server.
+        _wrapped_names = {str(r.get("server")) for r in spool.read(limit=100000)
+                          if r.get("adapter") == "wrap" and r.get("server")}
+        _store_w = data.get("store") if isinstance(data.get("store"), dict) else {"servers": {}}
+        for _k in (_store_w.get("servers") or {}) if _wrapped_names else ():
+            try:
+                _names_k = {str(_k), history.display_name(_store_w, str(_k))} | {
+                    str(a) for a in ((_store_w.get("servers") or {}).get(_k) or {}).get("aliases") or []}
+            except Exception:                      # noqa: BLE001
+                _names_k = {str(_k)}
+            if not (_names_k & _wrapped_names):
+                continue                           # wrap never watched this one — no second read
+            _ob = observed_mod.observe(_store_w, str(_k))
+            if _ob is None:
+                continue
+            # Keyed by BOTH the display name (what a rendered row carries) and the store key,
+            # because callers hold whichever one they happen to have.
+            data["wrap_observed"][_ob.server] = _ob.to_dict()
+            data["wrap_observed"][str(_k)] = _ob.to_dict()
+    except Exception as exc:                       # noqa: BLE001
+        data["wrap_observed"] = {}
+        data["errors"]["wrap_observed"] = f"{type(exc).__name__}: {exc}"
+
     # Config-only findings (configcheck.py), recomputed from the entries just discovered — never
     # persisted, so they can't go stale and they exist on the machine that has never run a verify.
     # This is the beta-tester-1 fix reaching the panel: her Findings tab said 0 because verify had
@@ -417,6 +451,15 @@ TIERS = (
     ("findings", "With findings", "verification caught it doing something — exfiltration, SSRF "
                                   "or injected output"),
     ("unverified", "Unverified", "never watched — absence of a finding, not safety"),
+    # OBSERVED IS NOT VERIFIED, AND SAYS SO IN ITS OWN NAME. A session-bound-auth server can never
+    # be verified here: the login belongs to the client's live session and verify's own session
+    # times out. `wrap` rides that authenticated pipe and watches the real calls — real evidence,
+    # weaker than reproduction. Without this tier such a server sat in "Unverified" beside servers
+    # nothing had ever looked at, so the one thing we DID know about it was invisible; the only
+    # alternative on offer — letting it reach "At baseline" — would have sold observation as
+    # verification, which is the mistake observed.py exists to make impossible.
+    ("observed", "Observed (wrap)", "watched in your client's real traffic — observation, not "
+                                    "reproduction: the sandbox checks were not run"),
     ("baseline", "At baseline", "matches what you approved, and behaviour was observed"),
 )
 
@@ -452,6 +495,12 @@ def _classify(name: str, key: str | None, d: dict) -> str:
     ran = (d.get("verified_runs") or {}).get(name)
     exercised = isinstance(ran, dict) and (ran.get("toolsChecked") or 0) > 0
     if not exercised and name not in (d.get("observed") or {}):
+        # Nothing verified it — but wrap may have WATCHED it. That is a real, weaker fact, and it
+        # is checked only here, after every stronger tier has declined: an observed server with
+        # findings is still a server with findings.
+        _obs = d.get("wrap_observed") or {}
+        if name in _obs or (key and str(key) in _obs):
+            return "observed"
         return "unverified"
     return "baseline"
 
@@ -2118,6 +2167,9 @@ API_ALLOWED = ("errors", "discovery_problems", "unscannable", "pending", "activi
                "denied_servers", "hooks", "hook_health", "adapters", "no_hook", "runs",
                "observed", "verified_runs", "findings", "verify_at", "verify_blocked",
                "monitor", "gateway", "recent_calls", "verified",
+               # wrap's observation record — deliberately a SEPARATE key from `verified`, so a
+               # consumer cannot read observation as reproduction by accident.
+               "wrap_observed",
                # which file each client's fleet was read from: client, path, status — no values
                "sources")
 #: Present in `collect()`, deliberately NOT in the API as-is: the two wide call windows are
@@ -2394,7 +2446,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # bold name over grey mono id, transport as an outline tag, right-aligned numerics, and the
     # tier as a fully-rounded tinted tag in the shape of their Healthy / Degraded column.
     _tag = {"blocked": "bad", "findings": "bad", "changed": "warn",
-            "unverified": "unv", "baseline": "ok"}
+            "unverified": "unv", "observed": "obs", "baseline": "ok"}
     _tlabel = {t: lbl for t, lbl, _ in TIERS}
     #: name -> how many tools this server DECLARES destructive; feeds the first-run story with a
     #: real number instead of an invented one.
@@ -2652,6 +2704,31 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                 _dmark = ((_dw[0][0] + (_dw[1][0] if len(_dw) > 1 else (_dw[0][1:2] or "")))
                           .upper() if _dw else "?")
                 _cost = detail['cost_index']
+                # WHAT WRAP WATCHED, stated as observation. The drawer is where a reader asks
+                # "what do you actually know about this server?" — for a session-bound server that
+                # is the only answer there will ever be, and it has to arrive WITH its limits, not
+                # as a quieter kind of verified. `not_tested` is printed in full: those checks need
+                # verify's sandbox, and absence of a signal from a check never run is not a clean
+                # result.
+                _ob = (d.get("wrap_observed") or {}).get(name) \
+                    or (d.get("wrap_observed") or {}).get(str(key or ""))
+                _ob_block = ""
+                if isinstance(_ob, dict):
+                    _ex = ", ".join(str(t) for t in (_ob.get("tools_exercised") or [])[:8]) or "none"
+                    _wb = [str(t) for t in (_ob.get("would_block") or [])]
+                    _wb_line = (f'<div class="unobs">{len(_wb)} call(s) your baseline WOULD have '
+                                f'blocked were seen: {_esc(", ".join(_wb[:6]))}. wrap observes — '
+                                'nothing was stopped.</div>') if _wb else ""
+                    _ob_block = (
+                        '<div class="ddh">observed by wrap · not verified</div>'
+                        f'<div class="unobs">{_esc(_ob.get("summary") or "")}</div>'
+                        '<div class="tscroll"><table class="mini"><tbody>'
+                        f'<tr><td class="nm">tools declared</td><td>{int(_ob.get("tools_declared") or 0)}</td></tr>'
+                        f'<tr><td class="nm">calls seen</td><td>{int(_ob.get("calls_seen") or 0)}</td></tr>'
+                        f'<tr><td class="nm">tools exercised</td><td>{_esc(_ex)}</td></tr>'
+                        f'<tr><td class="nm">NOT tested</td><td>'
+                        f'{_esc(", ".join(str(x) for x in (_ob.get("not_tested") or [])))}</td></tr>'
+                        '</tbody></table></div>' + _wb_line)
                 drawer = f"""<aside class="side">
   <header class="mhead">
     <span class="mmark {_tag[tier]}">{_esc(_dmark)}</span>
@@ -2675,6 +2752,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     <div class="stat"><span class="sl">Also known as</span><span class="sv">{_esc(', '.join(detail['aliases']) or '—')}</span></div>
   </div>
   {callout}
+  {_ob_block}
   <div class="ddh">what the guard has seen</div>
   <div class="tscroll"><table class="mini"><tbody>{tool_lines}</tbody></table></div>
   <div class="ddh">declared vs observed · verdicts rest on observation, not names</div>
@@ -2843,8 +2921,23 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                      f'{len(_auth_asks)} sign-in(s) — {_who}</a>')
     if pending:
         _asks.append(f'<label class="bask" for="n3">{len(pending)} approval(s) waiting</label>')
+    # ONE FLEET, ONE NUMBER. This screen and /next are rendered from the same collect(), and
+    # render_next's docstring says it "can never disagree with it about what is outstanding" —
+    # but only /next ever called next_queue, so the dashboard counted sign-ins and approvals
+    # alone. Measured 2026-09-18 on a real fleet: /next said "13 need you" while this screen
+    # said "All quiet." over its own red row reading "1 finding to review". The queue is the
+    # single source; terminals are excluded here exactly as /next excludes them.
+    _queue_live = [it for it in next_queue(d) if not it.get("terminal")]
+    _queue_rest = len(_queue_live) - len(_auth_asks) - (1 if pending else 0)
+    if _queue_rest > 0:
+        # "MORE" ONLY WHEN THERE IS SOMETHING TO BE MORE THAN. On a fleet with no sign-in and no
+        # pending approval this chip is the ONLY thing in the line, and it read "Needs you: 5 more
+        # to review" — more than what? Seen on the Servers tab in the walk before 0.1.51.
+        _more = "more " if _asks else ""
+        _asks.append(f'<a class="bask" href="/next?t={_esc(token)}">{_queue_rest} {_more}to '
+                     f'review — one at a time</a>')
     _needs = (' · '.join(_asks) if _asks
-              else 'nothing — sign-ins and trust decisions are the only things that ever will')
+              else 'nothing — the queue is empty')
     _ghost_note = (f' · {_ghosts} remembered, configured nowhere now' if _ghosts else '')
     brief = (f'<div class="brief"><span class="bcount"><b>{len(classified) - _ghosts}</b> servers'
              f'{_ghost_note} · '
@@ -2860,7 +2953,14 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         if not _f.get("first_party") and not muted_by_you(_f):
             _s = str(_f.get("server") or "")
             _f_by_srv[_s] = _f_by_srv.get(_s, 0) + 1
-    _asks_n = len(_auth_asks) + (1 if pending else 0)     # terminals are NOT things that need you
+    _asks_n = len(_queue_live)        # the SAME queue /next counts; terminals already excluded
+    # ONE NUMBER, BUT THE COLOUR IS STILL EARNED. Making the count the whole queue also made the
+    # Today pill red for every item in it. A fresh install holds three: an unmeasured server, an
+    # unhooked agent, and — because unpinned `npx` is the ecosystem's README default — one LOW
+    # config finding. So `mcpgawk panel` booted red about normality, which is exactly the defect
+    # the Findings badge was fixed for on 2026-08-23 (founder call: low findings inform, they do
+    # not alarm) rebuilt one pill along. The count stays whole; the ink is reserved.
+    _asks_alarm = queue_alarms(_queue_live)
     _t_head = (f"{_asks_n} thing{'s' if _asks_n != 1 else ''} need"
                f"{'' if _asks_n != 1 else 's'} you." if _asks_n else "All quiet.")
     _cards = []
@@ -2906,20 +3006,34 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                       f'Not yours to finish — <a href="{_tierurl("signin")}">show them in the '
                       f'fleet</a></div>')
     if _aside:
-        _cards.append(f'<div class="ask calm">{len(_aside)} server(s) set aside by you — '
+        _cards.append(f'<div class="ask calm"><span>{len(_aside)} server(s) set aside by you — '
                       f'{_esc(", ".join(_aside))}: you recorded that {"they are" if len(_aside) > 1 else "it is"} '
                       f'not available to you, so mcpgawk stops asking. Still listed, and you can '
                       f'put {"them" if len(_aside) > 1 else "it"} back — '
                       f'<a href="{_tierurl("signin")}">show {"them" if len(_aside) > 1 else "it"} in '
-                      f'the fleet</a></div>')
+                      f'the fleet</a></span></div>')
     if pending:
         _cards.append(f'<div class="ask"><span class="ak">trust decision — only you should</span>'
                       f'<h5>{len(pending)} server{"s" if len(pending) != 1 else ""} changed after '
                       f'you approved {"them" if len(pending) != 1 else "it"}</h5>'
                       f'<p>Blocked meanwhile — the rug-pull shape is exactly this.</p>'
                       f'<label class="act-btn albl" for="n3">Review &amp; decide</label></div>')
-    _asks_html = "".join(_cards) or ('<div class="ask calm">Nothing needs you — sign-ins and '
-                                     'trust decisions are the only things that ever will.</div>')
+    # THE SAME CONTRADICTION, ONE ELEMENT DOWN. These cards are built from sign-ins and pending
+    # approvals alone, so their empty state used to say "Nothing needs you — sign-ins and trust
+    # decisions are the only things that ever will" — the claim 05f6935 removed from the line
+    # above it, still being made here. Found in the browser walk on a fleet of two unmeasured
+    # servers: "3 things need you." with "Nothing needs you" directly underneath. An empty CARD
+    # deck is not an empty QUEUE, and only the queue may say nothing needs you.
+    if _cards:
+        _asks_html = "".join(_cards)
+    elif _queue_live:
+        _asks_html = ('<div class="ask calm"><span>Nothing here needs a sign-in or a trust '
+                      f'decision — the {len(_queue_live)} still open '
+                      f'{"are" if len(_queue_live) != 1 else "is"} work you can do yourself. '
+                      f'<a href="/next?t={_esc(token)}">Take them one at a time</a>.'
+                      '</span></div>')
+    else:
+        _asks_html = '<div class="ask calm">Nothing needs you — the queue is empty.</div>'
     _PROBLEM = {"blocked", "findings", "changed"}
     _trows = []
     for _n2, _e2, _k2, _t2 in classified:
@@ -3669,6 +3783,12 @@ border-bottom:1px solid var(--line);font-size:12.5px;color:var(--mut)}}
 .ask p{{margin:0 0 10px;font-size:12px;color:var(--mut)}}
 .ask.calm{{border-style:dashed;border-color:var(--line);color:var(--mut);display:flex;
 align-items:center;font-size:13px}}
+/* A calm card is a FLEX ROW, so a bare `text <a>link</a>` loses the space between them — the
+   browser drops whitespace BETWEEN flex items. Seen in the walk as "do yourself.Take them one at
+   a time". Each calm card therefore wraps its sentence in one span, and its links wear the
+   table's accent rather than the browser's default blue, which nothing else on this page uses. */
+.ask.calm a{{color:var(--acc-ink);font-weight:600;text-decoration:none}}
+.ask.calm a:hover{{text-decoration:underline}}
 .albl{{display:inline-block;cursor:pointer}}
 .fhead2{{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
 color:var(--fai);margin:0 0 6px}}
@@ -3727,6 +3847,7 @@ background:var(--acc-soft);color:var(--acc-ink)}}
 .mmark.warn{{background:var(--warn-bg);color:var(--warn)}}
 .mmark.bad{{background:var(--acc-soft);color:var(--acc-ink)}}
 .mmark.unv{{background:var(--rail);color:var(--mut)}}
+.mmark.obs{{background:var(--rail);color:var(--mut);border:1px dashed var(--line-strong)}}
 .mclose{{width:30px;height:30px;border-radius:50%;flex:none;display:grid;place-items:center;
 font-size:20px;line-height:1;color:var(--mut);text-decoration:none;
 border:1px solid var(--line-strong);background:var(--card);transition:all 140ms var(--ease)}}
@@ -3911,6 +4032,7 @@ color:var(--warn);background:var(--warn-bg)}}
 .chip.warn{{color:var(--warn);background:var(--warn-bg)}}
 .chip.bad{{color:var(--bad);background:var(--bad-bg)}}
 .chip.unv{{color:var(--unv);background:var(--unv-bg)}}
+.chip.obs{{color:var(--unv);background:var(--unv-bg);border:1px dashed var(--line-strong)}}
 .rowact{{display:inline-flex;gap:7px;justify-content:flex-end}}
 .actwrap{{display:flex;gap:7px;justify-content:flex-end;flex-wrap:wrap;align-items:center}}
 .actwrap .act-sm,.actwrap button{{white-space:nowrap}}
@@ -3930,10 +4052,14 @@ transition:border-color 160ms var(--ease),color 160ms var(--ease),transform 160m
 margin:2px 0 10px}}
 .seg.blocked,.seg.findings{{background:var(--bad)}}.seg.changed{{background:var(--warn)}}
 .seg.unverified{{background:var(--unv)}}.seg.baseline{{background:var(--ok)}}
+/* OBSERVED reuses the unverified token, hatched — the palette is fixed (sage/cream + one orange),
+   so a fifth tier gets a TEXTURE, not a sixth colour, and still reads as "less than baseline". */
+.seg.observed{{background:repeating-linear-gradient(135deg,var(--unv) 0 4px,var(--rail) 4px 8px)}}
 .legend{{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--mut)}}
 .sw{{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}}
 .sw.blocked,.sw.findings{{background:var(--bad)}}.sw.changed{{background:var(--warn)}}
 .sw.unverified{{background:var(--unv)}}.sw.baseline{{background:var(--ok)}}
+.sw.observed{{background:repeating-linear-gradient(135deg,var(--unv) 0 3px,var(--rail) 3px 6px)}}
 .legend b{{font-variant-numeric:tabular-nums}}
 .cbar{{display:grid;grid-template-columns:150px minmax(0,1fr) auto;gap:12px;align-items:center;
 margin:9px 0}}
@@ -4128,7 +4254,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
    '<code>mcpgawk panel</code> printed in your terminal. Reopen from there to act. '
    'That is deliberate: a bookmark or restored tab must not be able to drive this machine.</div>'}
   <div class="rail">
-    <label class="pill" for="n9"><span class="dot"></span><span class="pw"><span class="prow">Today{f'<span class="ct alert">{_asks_n}</span>' if _asks_n else ''}</span><span class="pdesc">what needs you, and the fleet worst first</span></span></label>
+    <label class="pill" for="n9"><span class="dot"></span><span class="pw"><span class="prow">Today{f'<span class="ct{" alert" if _asks_alarm else ""}">{_asks_n}</span>' if _asks_n else ''}</span><span class="pdesc">what needs you, and the fleet worst first</span></span></label>
     <label class="pill" for="n4"><span class="dot"></span><span class="pw"><span class="prow">History</span><span class="pdesc">every call, run and decision, newest first</span></span></label>
     <span class="ngrp">Detail <i>go deeper on demand</i></span>
     <label class="pill pc" for="n0"><span class="dot"></span>Servers <span class="ct">{len(classified) - sum(1 for _c in classified if (_c[1] or {}).get("_baseline_only"))}</span></label>
@@ -8079,6 +8205,25 @@ def next_token(it: dict[str, Any]) -> str:
     return f"{it['kind']}:{it['key']}" + (f"/{it['finding_id']}" if it.get("finding_id") else "")
 
 
+# Which queue kinds earn the alarm colour. A sign-in and a trust decision always do — they were
+# the only two the dashboard counted before the queue became its source. Setup steps (never
+# measured, verify unfinished, monitoring off, no hook) are real work and they COUNT, but they do
+# not shout: a first run paints them the moment the tool is installed.
+ALARM_QUEUE_KINDS = frozenset({"decision", "signin"})
+
+
+def queue_alarms(items: list[dict[str, Any]]) -> bool:
+    """Does this queue hold anything that has earned the alarm colour?
+
+    The count and the colour are different questions. `next_queue` answers "what is outstanding";
+    this answers "is any of it a warning". A finding alarms unless it is EXPLICITLY low — a
+    missing severity alarms, because ambiguity must never read as safe (the same rule the
+    Findings badge states at its own `_f_alarm`)."""
+    return any(it.get("kind") in ALARM_QUEUE_KINDS
+               or (it.get("kind") == "finding" and str(it.get("severity")).lower() != "low")
+               for it in items)
+
+
 def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset()) -> list[dict[str, Any]]:
     """The human gates on this machine, one entry each, in the order they are served (the
     spec's kinds): 1 servers whose agents are refused right now (changed since approval, newest
@@ -8806,7 +8951,7 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
     <span class="mono">{" · ".join(_esc(f) if "<a " not in f else f for f in facts)}</span></div>
   {done}{body}
   <div class="foot"><span>Look up · <a href="/?{q_t}tab=n0">servers</a> · <a href="/?{q_t}tab=n4">calls</a> · <a href="/?{q_t}tab=n2">runs</a> · <a href="/export/calls.csv">exports</a></span>
-    <a href="/?{q_t}tab=n9">the full panel</a><span class="mono">mcpgawk decide walks the same queue in a terminal</span></div>
+    <a href="/?{q_t}tab=n9">the full panel</a><span class="mono">mcpgawk decide — the trust decisions, on their own page</span></div>
 </div></body></html>"""
 
 

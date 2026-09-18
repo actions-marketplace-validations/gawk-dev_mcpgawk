@@ -47,6 +47,30 @@ export function groupEgressByHost(egressFindings) {
         .map(([host, tools]) => ({ host, tools: [...tools].sort() }))
         .sort((a, b) => a.tools.length - b.tools.length || a.host.localeCompare(b.host));
 }
+/**
+ * Cluster check errors by the CAUSE they reported, most frequent first.
+ *
+ * Both human-facing renderers used to print `tool::code` and drop `detail` on the floor — so a run
+ * that failed for one nameable reason ("MCP error -32601: Method not found", the demo sandbox on
+ * 2026-09-18) told the reader only THAT it failed, never WHY, while the JSON, SARIF and JUnit
+ * renderers had carried `detail` all along. The cause is not per-tool noise: one broken server
+ * produces the same message across every tool it owns (see runner.ts's 27-errors-on-7-tools note),
+ * so grouping is what makes it readable rather than 27 repetitions of one sentence.
+ *
+ * `detail` is legitimately empty — verify.ts pushes `startupDetail ?? ""` — and those errors group
+ * under `""`, which callers must render as the bare tool list with no dangling cause clause.
+ */
+export function groupCheckErrors(checkErrors) {
+    const byDetail = new Map();
+    for (const c of checkErrors) {
+        const labels = byDetail.get(c.detail) ?? [];
+        labels.push(`${c.tool}::${c.code}`);
+        byDetail.set(c.detail, labels);
+    }
+    return [...byDetail.entries()]
+        .map(([detail, labels]) => ({ detail, labels }))
+        .sort((a, b) => b.labels.length - a.labels.length || a.detail.localeCompare(b.detail));
+}
 /** Worst severity → status. critical ⇒ vulnerable; high/medium ⇒ at-risk; else clean.
  *
  * NOTE: severity ALONE can never decide a status — it cannot see whether anything was actually

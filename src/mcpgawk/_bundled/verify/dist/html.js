@@ -1,4 +1,4 @@
-import { groupEgressByHost, } from "./report.js";
+import { groupCheckErrors, groupEgressByHost, } from "./report.js";
 function esc(s) {
     return s
         .replace(/&/g, "&amp;")
@@ -57,7 +57,12 @@ function serverCard(s) {
         ? `<p class="note">Not invoked (safe mode): ${s.skipped.map((k) => `${esc(k.tool)} (${esc(k.class)})`).join(", ")}</p>`
         : "";
     const checkErrors = s.checkErrors.length
-        ? `<p class="note" style="color:var(--warn)">${s.checkErrors.length} check(s) never completed (infra failure, NOT clean): ${s.checkErrors.map((c) => `${esc(c.tool)}::${esc(c.code)}`).join(", ")}</p>`
+        ? `<p class="note" style="color:var(--warn)">${s.checkErrors.length} check(s) never completed (infra failure, NOT clean):</p><ul class="note" style="color:var(--warn)">${groupCheckErrors(s.checkErrors)
+            .map((g) => {
+            const labels = g.labels.map((l) => esc(l)).join(", ");
+            return `<li>${g.detail ? `${esc(g.detail)} (${labels})` : labels}</li>`;
+        })
+            .join("")}</ul>`
         : "";
     const remoteNote = remote
         ? `<p class="note">Remote server — can’t be sandboxed; egress checks not applicable. Ran: ${s.checksRun.map(esc).join(", ")}.</p>`
