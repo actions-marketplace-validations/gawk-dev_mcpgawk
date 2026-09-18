@@ -10,7 +10,7 @@ import { renderHtml } from "./html.js";
 import { toJUnit } from "./junit.js";
 import { LEGACY_PINS_SCHEMA_VERSIONS, PINS_SCHEMA_VERSION, diffPins, hasDrift, } from "./pins.js";
 import { redactAuditEvent, redactDocument, redactText } from "./redact.js";
-import { buildReport, exitCodeForStatus, groupEgressByHost, toCsv, } from "./report.js";
+import { buildReport, exitCodeForStatus, groupCheckErrors, groupEgressByHost, toCsv, } from "./report.js";
 import { toSarif } from "./sarif.js";
 import { serve } from "./serve.js";
 import { loadSuppressions, saveSuppressions, withSuppression } from "./suppressions.js";
@@ -601,12 +601,28 @@ export function printText(report, log) {
             log(`  ⚠ DRIFT since baseline — ${parts.join("; ")} (possible rug-pull)`);
         }
         if (s.checkErrors.length > 0) {
-            const shown = s.checkErrors
-                .slice(0, 8)
-                .map((c) => `${c.tool}::${c.code}`)
-                .join(", ");
-            const more = s.checkErrors.length > 8 ? `, +${s.checkErrors.length - 8} more` : "";
-            log(`  ⚠ ${s.checkErrors.length} check(s) never completed (infra failure, NOT clean): ${shown}${more}`);
+            // The CAUSE, not just the casualty list. This printed `tool::code` only until 2026-09-18,
+            // so the demo sandbox's "-32601 Method not found" — present in the JSON, SARIF and JUnit
+            // all along — was invisible to the one reader who had to act on it. Grouped by detail
+            // because one broken server repeats a single message across every tool it owns.
+            const groups = groupCheckErrors(s.checkErrors);
+            log(`  ⚠ ${s.checkErrors.length} check(s) never completed (infra failure, NOT clean):`);
+            for (const g of groups.slice(0, 3)) {
+                // Four labels, not eight: the cause is what the reader acts on, and a long casualty list
+                // pushed it off the readable part of the line. The full list is in the JSON.
+                const shown = g.labels.slice(0, 4).join(", ");
+                const more = g.labels.length > 4 ? `, +${g.labels.length - 4} more` : "";
+                // An empty detail is real (a startup failure with no message): print the tools alone
+                // rather than a dangling cause clause that says nothing.
+                // Redacted at print time, like the tool names below: `detail` is an unfiltered
+                // `Error.message` from someone else's server, and the JSON FILE write redacts the same
+                // field. (Terminal only — `--json` on stdout and the HTML already emit the raw report.)
+                const cause = redactText(g.detail);
+                log(cause ? `      ↳ ${cause} (${shown}${more})` : `      ↳ ${shown}${more}`);
+            }
+            if (groups.length > 3) {
+                log(`      ↳ +${groups.length - 3} further cause(s) — see the JSON report`);
+            }
         }
         if (s.findings.length === 0) {
             // "Nothing was reproduced" only means something if something was TRIED. A server whose every

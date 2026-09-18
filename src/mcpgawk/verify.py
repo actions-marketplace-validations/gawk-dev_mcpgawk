@@ -19,11 +19,86 @@ delegates the launching here rather than keeping a second copy of it.
 """
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import TextIO
+
+
+def observed_followup(report: dict, store: dict, *, spool_path: str | None = None) -> list[str]:
+    """After the engine runs, name the OBSERVED alternative for each server it could NOT complete
+    but `wrap` has watched — a session-bound-auth server (kite) verify can never hold. Pure and
+    disk-free so it can be tested; the printer below feeds it the real report and store.
+
+    OBSERVATION, never reproduction: the lines say what wrap saw and what was NOT tested. A server
+    verify DID complete is left alone — this only ever adds a pointer where verify fell short.
+    """
+    from . import history, observed
+    lines: list[str] = []
+    for s in (report.get("servers") or []):
+        if not isinstance(s, dict) or not s.get("server"):
+            continue
+        incomplete = str(s.get("status") or "").upper() == "INCOMPLETE" or s.get("complete") is False
+        if not incomplete:
+            continue
+        name = str(s["server"])
+        try:
+            key = history.resolve(store, name) or name
+            ov = observed.observe(store, key, spool_path=spool_path)
+        except Exception:  # noqa: BLE001 — a follow-up must never sink the verify exit
+            ov = None
+        reasons = " ".join(str(x) for x in (s.get("incompleteReasons") or [])).lower()
+        auth_ish = any(w in reasons for w in ("sign in", "sign-in", "log in", "login", "auth", "session"))
+        if ov is not None:
+            lines.append(f"  ℹ {name}: verify could not complete here, but wrap has observed it "
+                         f"in your real traffic:")
+            lines.append(f"    {ov.summary_line()}")
+        elif auth_ish:
+            lines.append(f"  ℹ {name}: verify could not complete — its login is bound to the "
+                         f"live session it cannot hold.")
+            lines.append(f"    For an observed baseline from your real traffic instead, run:  "
+                         f"mcpgawk wrap install {name}")
+    return lines
+
+
+def _last_verify_path() -> Path:
+    base = os.environ.get("GAWK_BEHAVIOUR_PROFILE")
+    parent = Path(base).parent if base else Path.home() / ".gawk"
+    return parent / "last-verify.json"
+
+
+def _print_observed_followup(stream: "TextIO | None" = None) -> None:
+    """Read the report the engine just wrote and print the OBSERVED follow-up. Never raises: a
+    helper that explodes must not turn a finished verify into a crash.
+
+    `stream` decides stdout vs stderr, and the caller decides by whether stdout is a MACHINE
+    stream. These lines are human prose appended AFTER the engine has finished writing, so under
+    `--json` they landed inside the report: `mcpgawk verify --json | jq` failed with "Invalid
+    numeric literal", and `--json > report.json` wrote a file that is not JSON. Measured
+    2026-09-18 against a leaky-config fixture. In a human run the engine's own prose goes to
+    stdout, so these belong there too and the default is unchanged.
+    """
+    out = stream if stream is not None else sys.stdout
+    try:
+        from . import history
+        rep = _last_verify_path()
+        if not rep.is_file():
+            return
+        report = json.loads(rep.read_text(encoding="utf-8"))
+        store, _err = history.load_checked(history.default_path())
+        lines = observed_followup(report, store)
+        if lines:
+            print(file=out)
+            for ln in lines:
+                print(ln, file=out)
+    except Exception:  # noqa: BLE001
+        return
 
 from .node_runtime import find_node, install_hint
 
@@ -174,7 +249,13 @@ def run(argv: list[str], timeout: float | None = None) -> int:
                 proc.kill()
 
     try:
-        return proc.wait(timeout=timeout)
+        rc = proc.wait(timeout=timeout)
+        # After the engine's own output: if it could not complete a session-bound-auth server that
+        # wrap has observed, name the observed alternative. Never changes the exit code.
+        # `--json` is detected exactly as the engine detects it (cli.ts: `argv.includes("--json")`)
+        # so the wrapper and the engine can never disagree about which mode this run is in.
+        _print_observed_followup(sys.stderr if "--json" in argv else sys.stdout)
+        return rc
     except subprocess.TimeoutExpired:
         _kill_the_whole_group()
         print("mcpgawk verify: timed out — this run is INCOMPLETE, not clean", file=sys.stderr)
