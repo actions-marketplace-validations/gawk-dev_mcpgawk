@@ -181,6 +181,19 @@ def _diff_block(report: drift.DriftReport) -> str:
     return "\n".join(rows) or '<div class="ev"><div class="lbl">No detail recorded.</div></div>'
 
 
+def _blocks_calls(r: drift.DriftReport) -> bool:
+    """Does the guard REFUSE calls on this change, or only queue it? Every card used to say
+    "blocked", including a type change or a reworded parameter that the guard lets through while it
+    waits for sign-off (decision.py, FOUNDER 2026-08-15). Queue-only is claimed ONLY when the whole
+    change is schema/annotation movement with no permission growth; anything else keeps the
+    blocked wording, because calling a blocked change harmless is the worse error."""
+    if (r.unreadable or r.login_changed or r.transport_changed or r.protocol_changed
+            or r.added or r.changed or r.hostile):
+        return True
+    moved = r.schema_changed + r.annotation_changed
+    return not moved or any(r.permission_changes(k) for k in moved)
+
+
 def _total_line(total: Any) -> str:
     """The change since the ORIGINAL baseline, under the step: what trusting this makes the server,
     measured from where it started. Empty when the step is the whole story."""
@@ -222,14 +235,19 @@ def render_page(items: list[dict[str, Any]], token: str, note: str = "",
         for it in items:
             r: drift.DriftReport = it["report"]
             danger = " danger" if it["hostile"] else ""
+            if _blocks_calls(r):
+                pill, gate = "blocked · waiting on you", "Your agents cannot call it until you decide."
+            else:
+                pill, gate = ("queued · waiting on you",
+                              "Calls still go through; this waits for your sign-off.")
             cards.append(f"""
 <section class="card{danger}">
   <div class="head">
     <h2>{_esc(it['name'])}</h2>
-    <span class="pill">blocked · waiting on you</span>
+    <span class="pill">{pill}</span>
   </div>
   <p class="sub">{_esc(it.get('head') or 'Changed since its baseline')}{(' · last seen ' + _esc(it['seen_at'])) if it['seen_at'] else ''}.
-     Your agents cannot call it until you decide.</p>
+     {gate}</p>
   {_diff_block(r)}
   {_total_line(it.get('since_original'))}
   {(f'''<form method="POST" action="/decide">

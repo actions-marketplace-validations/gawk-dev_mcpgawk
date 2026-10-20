@@ -1667,15 +1667,8 @@ def _protect() -> int:
     # its 300s harness budget is half the code's own 600s.
     #
     # The scan result above is already printed and is the useful answer. Behavioural verification
-    # is the expensive, deliberate step, so off a TTY it is NAMED and skipped, never silently
-    # dropped — an absent verify must not read as a clean one.
-    if sys.stdout.isatty():
-        _front_door_verify(choice)
-    else:
-        print("  Behavioural verification SKIPPED — it launches every server and takes minutes, "
-              "so it needs a terminal you can watch and interrupt.\n"
-              "  Run `mcpgawk verify` to do it deliberately. This is not a clean result; it is "
-              "no result.\n", file=sys.stderr)
+    # is the expensive, deliberate step: it is OFFERED after the closing report, never run before
+    # it (see _offer_verify).
 
     store, _store_err = _store_or_say_why()
     _warn_if_store_unreadable(_store_err)
@@ -1697,6 +1690,7 @@ def _protect() -> int:
         _unchecked.append((_n, "set aside by you — not measured" if _n in _aside
                            else "needs your sign-in — not measured this run"))
     print(protect.protection_report(store, guard_line, unchecked=_unchecked))
+    _offer_verify(choice)
     # ONBOARDING STAGE 5 ([FOUNDER] 2026-08-15: onboarding ends at protect + PANEL, and the
     # first run offers the bridge): until now the flow finished and the control surface was
     # never mentioned — a user completed the scan and had no idea a panel existed. TTY only,
@@ -1714,6 +1708,36 @@ def _protect() -> int:
     else:
         print("\n  The control panel shows all of this live: mcpgawk panel")
     return rc
+
+
+def _offer_verify(choice: str) -> None:
+    """Ask, after the closing report, whether to watch what the servers actually do.
+
+    [FOUNDER] 2026-10-20 ("ask after the aha"): verify ran unconditionally here since 0.1.14, and
+    on a machine without Docker the first run's last word became a minute's wait and "this run is
+    INCOMPLETE, not clean" (measured: the scan result lands at ~8 s, verify then times out at
+    ~60 s). The first run now ends on protection being on; verify is one keypress away. Default
+    is No, and No is SAID: checks stay on what servers declare until a verify run completes, the
+    same posture `status` reports, so an absent verify never reads as a clean one.
+    """
+    if os.environ.get("MCPGAWK_NO_VERIFY") == "1":
+        return
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("  Behavioural verification SKIPPED — it launches every server and takes minutes, "
+              "so it needs a terminal you can watch and interrupt.\n"
+              "  Run `mcpgawk verify` to do it deliberately. This is not a clean result; it is "
+              "no result.\n", file=sys.stderr)
+        return
+    try:
+        ans = input("\n  Watch what they actually do? Each server runs in a sandbox, a few "
+                    "minutes. [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        ans = ""
+    if ans.strip().lower() in ("y", "yes"):
+        _front_door_verify(choice)
+    else:
+        print("  Not now. Until `mcpgawk verify` finishes a run, checks cover what servers "
+              "declare, not what they do.")
 
 
 def _behaviour_tool_count() -> int:
