@@ -1,0 +1,162 @@
+[
+ {
+  "package": "@notionhq/notion-mcp-server",
+  "version": "2.5.2",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 24,
+  "tokens": 16894,
+  "desc_tokens": 429,
+  "schema_tokens": 15752,
+  "unused_defs_tokens": 10889
+ },
+ {
+  "package": "mongodb-mcp-server",
+  "version": "3.1.0",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 27,
+  "tokens": 14232,
+  "desc_tokens": 410,
+  "schema_tokens": 12850,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "firecrawl-mcp",
+  "version": "3.33.4",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 26,
+  "tokens": 11893,
+  "desc_tokens": 2980,
+  "schema_tokens": 7736,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "@circleci/mcp-server-circleci",
+  "version": "0.20.0",
+  "source": "../tool-churn-2026/data/live-probe-churn-2026-10-04.json",
+  "tools": 13,
+  "tokens": 11767,
+  "desc_tokens": 7420,
+  "schema_tokens": 3700,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "@currents/mcp",
+  "version": "2.2.18",
+  "source": "../tool-churn-2026/data/live-probe-churn-2026-10-04.json",
+  "tools": 32,
+  "tokens": 8383,
+  "desc_tokens": 1435,
+  "schema_tokens": 6398,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "chrome-devtools-mcp",
+  "version": "1.11.0",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 32,
+  "tokens": 6305,
+  "desc_tokens": 792,
+  "schema_tokens": 4904,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "@shopify/dev-mcp",
+  "version": "1.17.0",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 5,
+  "tokens": 5537,
+  "desc_tokens": 3608,
+  "schema_tokens": 1779,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "@playwright/mcp",
+  "version": "0.0.83",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 25,
+  "tokens": 4336,
+  "desc_tokens": 351,
+  "schema_tokens": 3048,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "@mastra/mcp-docs-server",
+  "version": "1.3.9",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 13,
+  "tokens": 3465,
+  "desc_tokens": 1722,
+  "schema_tokens": 1432,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "@ui5/mcp-server",
+  "version": "0.3.2",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 10,
+  "tokens": 2353,
+  "desc_tokens": 310,
+  "schema_tokens": 1700,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "@modelcontextprotocol/server-everything",
+  "version": "2.0.0",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 16,
+  "tokens": 2067,
+  "desc_tokens": 520,
+  "schema_tokens": 908,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "@modelcontextprotocol/server-filesystem",
+  "version": "2.0.0",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 14,
+  "tokens": 1929,
+  "desc_tokens": 751,
+  "schema_tokens": 765,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "@modelcontextprotocol/server-memory",
+  "version": "2.0.0",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 9,
+  "tokens": 1195,
+  "desc_tokens": 138,
+  "schema_tokens": 702,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "@upstash/context7-mcp",
+  "version": "4.4.4",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 2,
+  "tokens": 1124,
+  "desc_tokens": 513,
+  "schema_tokens": 501,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "@modelcontextprotocol/server-sequential-thinking",
+  "version": "2.0.0",
+  "source": "data/live-probe-latest-2026-10-22.json",
+  "tools": 1,
+  "tokens": 891,
+  "desc_tokens": 566,
+  "schema_tokens": 267,
+  "unused_defs_tokens": 0
+ },
+ {
+  "package": "nx-mcp",
+  "version": "0.25.0",
+  "source": "../tool-churn-2026/data/live-probe-churn-2026-10-04.json",
+  "tools": 1,
+  "tokens": 149,
+  "desc_tokens": 68,
+  "schema_tokens": 48,
+  "unused_defs_tokens": 0
+ }
+]
