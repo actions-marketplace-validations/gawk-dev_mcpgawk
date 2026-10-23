@@ -148,6 +148,17 @@ mcpgawk scan mcp.json --supply-chain                              # opt-in: npm/
 mcpgawk scan mcp.json --oauth-scopes                              # opt-in: decode a supplied Bearer JWT's scope
 ```
 
+Keep tokens out of the config file. Under `mcpgawk wrap`, an `env` value written as `keychain:<service>`
+(or `keychain:<service>@<account>`) is read from your macOS Keychain when the server starts and placed
+in the server's environment only. The config holds a reference, the agent sees a reference, mcpgawk
+stores nothing. A reference that cannot be read refuses to start the server and names the reference,
+never a value.
+
+```json
+"github": { "command": "mcpgawk", "args": ["wrap", "--", "npx", "-y", "@modelcontextprotocol/server-github"],
+            "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "keychain:gh-work" } }
+```
+
 ## What it reports
 
 - **Cost index** — tokens each tool adds at connect (named tokenizer; a comparable index, not an

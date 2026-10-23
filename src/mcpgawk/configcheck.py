@@ -106,6 +106,7 @@ def _install_scripts(name: str, entry: dict[str, Any]) -> list[Finding]:
 
 #: Values that are config INDIRECTION, not a stored literal: `${VAR}` / `$VAR` expansion and
 #: secret-manager references. Pointing at a credential is the right pattern — never a finding.
+#: `keychain:<service>[@account]` is the one mcpgawk itself resolves, in `wrap`, at launch (inject.py).
 _INDIRECTION_PREFIXES = ("$", "op://", "keychain:", "secretmanager:", "vault:")
 
 #: Auth-scheme headers whose NAME does not look credential-ish to the assignment test. The scheme
