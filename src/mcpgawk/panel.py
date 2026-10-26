@@ -3942,8 +3942,9 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                         'description.</span>')
         for t in [x for x in rep.annotation_changed if x not in (_esc_ or [])][:1]:
             # An escalated key already has its sentence above; this is for a plain relabel.
+            _moves = "; ".join(f"{n}: {w} → {v}" for n, w, v in rep.hint_moves(t))
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">changed its safety '
-                        'annotations — a tool relabelled itself.</span>')
+                        f'hints, nothing widened{(" — " + _esc(_moves)) if _moves else ""}.</span>')
         total = (len(rep.hostile) + len(rep.added) + len(rep.removed) + len(plain_changed)
                  + len(rep.annotation_changed) + len(rep.schema_changed))
         if total > len(bits):
@@ -3972,8 +3973,8 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         grown = _h._permission_growth(base, latest) if base and latest else {}
         if grown:
             what = "; ".join(f"{t}: {', '.join(v)}" for t, v in sorted(grown.items()))
-            return f'<span class="chip bad"><i></i>Blocked — {_esc(what)}</span>'
-        return ('<span class="chip warn"><i></i>NOT blocked — an ordinary schema change, '
+            return f'<span class="chip bad say"><i></i>Blocked — {_esc(what)}</span>'
+        return ('<span class="chip warn say"><i></i>NOT blocked — an ordinary schema change, '
                 'calls still pass until you decide</span>')
 
     def _dec_who(k: str) -> str:
@@ -4488,6 +4489,9 @@ color:var(--warn);background:var(--warn-bg)}}
 /* .chip is the status pill — no-wrap. `.pill` is the NAV tab whose blurb MUST wrap; naming it
    here once painted every rail blurb as one endless line straight across the cards. */
 .chip{{white-space:nowrap}}
+/* A sentence-length chip (the Decisions severity) wraps: no-wrap pushed "calls still pass until
+   you decide" past the card's edge (walk of 0.1.81). */
+.chip.say{{white-space:normal;align-items:flex-start;border-radius:12px}}
 .act-sm{{font:inherit;font-size:12px;padding:4px 11px;border:1px solid var(--line);
 border-radius:8px;background:var(--card);color:var(--mut);cursor:pointer;
 transition:border-color 160ms var(--ease),color 160ms var(--ease),transform 160ms var(--ease)}}
@@ -8975,12 +8979,10 @@ def _next_diff(report) -> str:
         rows.append(f'<div class="ev"><div class="lbl">~ {_esc(tool)} — description changed</div>'
                     + _change_excerpt(*texts.get(tool, ("", ""))) + '</div>')
     for tool in report.annotation_changed:
-        # One row per key: an escalation says what grew; a plain relabel says so. (The walk of
-        # 0.1.75 showed the escalated tool twice, once per loop.)
-        _grew = ", ".join(report.escalations(tool)) if hasattr(report, "escalations") else ""
-        _what = (f"now declares more power than its baseline: {_grew}" if _grew
-                 else "safety annotations changed: a tool relabelled itself")
-        rows.append(f'<div class="ev danger"><div class="lbl">{_esc(tool)} — {_esc(_what)}</div></div>')
+        # One row per key, with the was/now (the walk of 0.1.75 showed the escalated tool twice).
+        # The same row the decide page writes: a rule in one file is not a rule.
+        from .decide import _hint_row
+        rows.append(_hint_row(report, tool))
     for tool in report.schema_changed:
         rows.append(f'<div class="ev"><div class="lbl">~ {_esc(tool)} — inputs changed</div></div>')
     return "\n".join(rows) or '<div class="ev"><div class="lbl">No detail recorded.</div></div>'
@@ -9006,6 +9008,7 @@ h1{font-size:26px;line-height:1.25;margin:0 0 10px;font-weight:600}
 .ev .lbl{font-weight:600}.ev.danger .lbl{color:var(--bad)}
 .ev .was,.ev .now{font-family:var(--mono);font-size:12px;white-space:pre-wrap;margin-top:4px;color:var(--mut)}
 .ev .now{color:var(--ink)}.ev .was b,.ev .now b{font-family:var(--mono);font-weight:600;margin-right:6px}
+.ev .moves{font-family:var(--mono);font-size:12px;white-space:pre-wrap;margin-top:4px;color:var(--ink)}
 .ev .same{font-family:var(--mono);font-size:12px;color:var(--mut);margin-top:4px}
 .actions{display:flex;align-items:center;gap:12px;margin:0 0 10px}
 .actions form{display:inline}.spacer{flex:1}

@@ -171,14 +171,31 @@ def _diff_block(report: drift.DriftReport) -> str:
                     + (f'<div class="was">{_esc(before)}</div><div class="now">{_esc(after)}</div>'
                        if before or after else "") + "</div>")
     for tool in report.annotation_changed:
-        grew = report.escalations(tool)
-        what = (f"now declares more power ({', '.join(grew)})" if grew
-                else "safety annotations changed (a tool relabelled itself)")
-        rows.append(f'<div class="ev danger"><div class="lbl">⚠ {_esc(tool)} — {_esc(what)}'
-                    f'</div></div>')
+        rows.append(_hint_row(report, tool, mark="⚠ "))
     for tool in report.schema_changed:
         rows.append(f'<div class="ev"><div class="lbl">~ {_esc(tool)} — inputs changed</div></div>')
     return "\n".join(rows) or '<div class="ev"><div class="lbl">No detail recorded.</div></div>'
+
+
+def _hint_row(report: drift.DriftReport, tool: str, mark: str = "") -> str:
+    """The annotation row with its was/now. Red only when something widened: writing the spec
+    defaults down is not a relabel, and calling it one taught approvers to fear honest servers."""
+    moves = report.hint_moves(tool)
+    widened = bool(report.escalations(tool))
+    cls = "ev danger" if widened else "ev"
+    head = mark if widened else "~ "
+    # A widening keeps the struck-out/red was-now pair. Anything else is one plain line per hint:
+    # red "now" text under "nothing widened" contradicted itself (walk of 0.1.81, Tently 0.1.2).
+    if not moves:
+        body = ""
+    elif widened:
+        body = (f'<div class="was">{_esc(chr(10).join(f"{n}: {w}" for n, w, _ in moves))}</div>'
+                f'<div class="now">{_esc(chr(10).join(f"{n}: {v}" for n, _, v in moves))}</div>')
+    else:
+        body = (f'<div class="moves">'
+                f'{_esc(chr(10).join(f"{n}: {w} → {v}" for n, w, v in moves))}</div>')
+    return (f'<div class="{cls}"><div class="lbl">{head}{_esc(tool)} — '
+            f'{_esc(report.hint_summary(tool))}</div>{body}</div>')
 
 
 def _blocks_calls(r: drift.DriftReport) -> bool:
@@ -289,6 +306,8 @@ padding:2px 8px;border-radius:99px;border:1px solid var(--bad);color:var(--bad)}
 background:var(--was);white-space:pre-wrap;word-break:break-word}}
 .was{{color:var(--muted);text-decoration:line-through}}
 .now{{color:var(--bad)}}
+.moves{{font-family:var(--mono);font-size:12px;padding:8px 10px;margin-top:6px;
+background:var(--was);white-space:pre-wrap;word-break:break-word}}
 form{{margin-top:18px;display:flex;gap:10px;flex-wrap:wrap}}
 .btn{{font-family:var(--sans);font-size:14px;font-weight:600;padding:9px 16px;
 border:1px solid var(--rule);background:var(--bg);color:var(--ink);cursor:pointer;border-radius:3px}}

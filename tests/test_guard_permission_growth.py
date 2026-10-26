@@ -107,6 +107,38 @@ def test_an_annotation_that_narrows_is_not_refused(tmp_path):
     assert _call(_store(tmp_path, a, b, strict=False)) is None
 
 
+_DEFAULT_FILL = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False,
+                 "openWorldHint": True}
+
+
+@pytest.mark.parametrize("after", [
+    # Tently @tently/mcp 0.1.1 -> 0.1.2 (npm, 2026-10-26): no annotations -> openWorldHint true.
+    {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+    {"destructiveHint": True},
+    _DEFAULT_FILL,
+], ids=["tently-0.1.2", "destructive-default", "default-fill"])
+def test_writing_down_a_spec_default_is_not_refused(tmp_path, after):
+    """An absent hint already MEANS the spec default (MCP 2025-06-18: openWorldHint and
+    destructiveHint default to true). Declaring it widens nothing, so the call is not refused."""
+    b = _tool()
+    b["annotations"] = after
+    assert _call(_store(tmp_path, _tool(), b, strict=False)) is None
+
+
+@pytest.mark.parametrize("before, named", [
+    ({"readOnlyHint": False, "destructiveHint": False}, "destructiveHint"),
+    ({"openWorldHint": False}, "openWorldHint"),
+])
+def test_dropping_a_narrowing_hint_back_to_the_default_is_refused(tmp_path, before, named):
+    """`destructiveHint: false -> absent` is a real gain (absent means true); measure.py requires
+    drift to catch it, and the raw `is True` comparison let it through silently."""
+    a = _tool()
+    a["annotations"] = before
+    output = _call(_store(tmp_path, a, _tool(), strict=False))
+    assert output is not None, f"a tool that dropped {named}: false after approval was allowed"
+    assert named in output["hookSpecificOutput"]["permissionDecisionReason"]
+
+
 def test_an_ordinary_schema_change_still_waits_for_sign_off_and_is_not_refused(tmp_path):
     """FOUNDER 2026-08-15, kept: a widened schema alone does not break the agent."""
     later = _tool(props={"note": {"type": "string"}, "pageId": {"type": "string"}})

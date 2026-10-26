@@ -319,3 +319,48 @@ def test_a_mixed_fleet_states_the_split():
         "at a baseline — 1 you approved, 2 with no person's approval on record"
     assert history.at_baseline_words(["approve", "fleet"], plural=True) == "at their approved baseline"
     assert history.at_baseline_words([]) == "at an approved baseline"
+
+
+# --- RULE: an annotation change shows its was/now, and is red only when something widened --------
+# Tently @tently/mcp 0.1.1 -> 0.1.2 (npm, 2026-10-26): the server added annotations that state the
+# spec defaults. Every surface said "annotations changed — a tool relabelled itself", in red, with no
+# values, so the approver could not see what moved and an honest server looked hostile.
+
+def _declared_defaults():
+    before = _rec(_snap([_tool("search_decisions", desc="Search the decision store")]))
+    after = _rec(_snap([_tool("search_decisions", desc="Search the decision store",
+                              anno={"readOnlyHint": True, "destructiveHint": False,
+                                    "idempotentHint": True, "openWorldHint": True})]))
+    return drift.compare(before, after)
+
+
+def test_the_scan_prints_each_hint_was_and_now():
+    text = drift.render("tently", _declared_defaults())
+    assert "nothing widened" in text, text
+    assert "openWorldHint: not set (means true) → true" in text, text
+    assert "readOnlyHint: not set (means false) → true" in text, text
+    assert "relabelled itself" not in text and "ESCALATION" not in text, text
+
+
+def test_the_decide_page_shows_the_was_now_and_is_not_red():
+    block = decide._diff_block(_declared_defaults())
+    assert "ev danger" not in block, block
+    assert "nothing widened" in block, block
+    # One plain line per hint, no red "now" under "nothing widened" (walk of 0.1.81).
+    assert 'class="moves"' in block and 'class="now"' not in block, block
+    assert "openWorldHint: not set (means true) → true" in block, block
+
+
+def test_the_panel_rows_match_the_decide_page():
+    from mcpgawk import panel
+    r = _declared_defaults()
+    rows = panel._next_diff(r)
+    assert "ev danger" not in rows and "nothing widened" in rows, rows
+    assert 'class="moves"' in rows and "openWorldHint: not set (means true) → true" in rows, rows
+    assert "relabelled itself" not in rows, rows
+
+
+def test_a_real_widening_stays_red_and_still_shows_values():
+    block = decide._diff_block(_escalated_only())
+    assert "ev danger" in block and "now declares more power (gained openWorldHint)" in block, block
+    assert "openWorldHint: false" in block and "openWorldHint: true" in block, block

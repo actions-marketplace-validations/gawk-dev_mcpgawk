@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .measure import Measurement
+from .measure import _MCP_DEFAULT_HINTS, Measurement
 from .probe import ServerSnapshot
 from .redact import redact
 
@@ -452,16 +452,55 @@ class DriftReport:
         Not every hint change matters. Losing `readOnlyHint` or gaining `destructiveHint` does: the
         tool previously told the agent it only reads, and now it does not — a structural change in
         what the agent will let it do, not a wording tweak. This is a comparison of declared
-        capability, not a text heuristic."""
+        capability, not a text heuristic.
+
+        An ABSENT hint means the spec default (`_MCP_DEFAULT_HINTS`), not "false": unset
+        openWorldHint/destructiveHint already mean true. Compared raw, a server that merely wrote
+        its defaults down (Tently 0.1.2, 2026-10-26: unset -> openWorldHint true) was refused, and
+        `destructiveHint: false -> unset` — a real gain, required by measure.py — was silent.
+        Only absent/None takes the default; any other value is compared exactly as declared."""
         before, after = self.annos.get(key, ({}, {}))
+
+        def declared(ann: dict, hint: str) -> Any:
+            value = ann.get(hint) if isinstance(ann, dict) else None
+            return _MCP_DEFAULT_HINTS[hint] if value is None else value
+
         out = []
         for hint in ("readOnlyHint", "idempotentHint"):
-            if before.get(hint) is True and after.get(hint) is not True:
+            if declared(before, hint) is True and declared(after, hint) is not True:
                 out.append(f"lost {hint}")
         for hint in ("destructiveHint", "openWorldHint"):
-            if before.get(hint) is not True and after.get(hint) is True:
+            if declared(before, hint) is not True and declared(after, hint) is True:
                 out.append(f"gained {hint}")
         return out
+
+    def hint_moves(self, key: str) -> list[tuple[str, str, str]]:
+        """Each annotation that moved, as `(name, was, now)` display strings — the was/now an
+        approver needs. "tool annotations CHANGED" alone made a server that merely wrote its
+        defaults down (Tently 0.1.2, 2026-10-26) look like it relabelled itself, with nothing to
+        read. An absent hint is shown with the spec default it stands for."""
+        before, after = self.annos.get(key, ({}, {}))
+        before = before if isinstance(before, dict) else {}
+        after = after if isinstance(after, dict) else {}
+
+        def shown(ann: dict, name: str) -> str:
+            if ann.get(name) is None:
+                default = _MCP_DEFAULT_HINTS.get(name)
+                return ("not set" if default is None
+                        else f"not set (means {json.dumps(default)})")
+            return json.dumps(ann[name], ensure_ascii=False)
+
+        hints = list(_MCP_DEFAULT_HINTS)
+        names = hints + sorted((set(before) | set(after)) - set(hints))
+        return [(n, shown(before, n), shown(after, n)) for n in names
+                if before.get(n) != after.get(n) or (n in before) != (n in after)]
+
+    def hint_summary(self, key: str) -> str:
+        """One sentence for the annotation row: what grew, or that nothing did."""
+        grew = self.escalations(key)
+        if grew:
+            return f"now declares more power ({', '.join(grew)})"
+        return "safety hints changed — nothing widened"
 
     def permission_changes(self, key: str) -> list[str]:
         """What this item can now do that the person never approved: an annotation escalation, a
@@ -1043,8 +1082,11 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
         for key in [k for k in r.annotation_changed if k.startswith(f"{kind}.")]:
             short = key[len(kind) + 1:]
             esc = r.escalations(key)
-            mark = f" ({', '.join(esc)})  ← CAPABILITY ESCALATION" if esc else ""
+            mark = (f" ({', '.join(esc)})  ← CAPABILITY ESCALATION" if esc
+                    else " — nothing widened")
             lines.append(f"        ! {kind} annotations CHANGED: {short}{mark}")
+            for name, was, now in r.hint_moves(key):
+                lines.append(f"            {name}: {was} → {now}")
         if split["added"]:
             lines.append(f"        + {_KIND_LABEL[kind]} added: {', '.join(split['added'])}")
         if split["removed"]:
