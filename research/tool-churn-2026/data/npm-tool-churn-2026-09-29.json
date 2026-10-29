@@ -1,0 +1,3652 @@
+{
+  "generated": "2026-09-28T21:46:45+00:00",
+  "as_of": "2026-09-29",
+  "window_days": 90,
+  "window_start": "2026-07-01",
+  "method": "Static measurement of install-line pinning, release cadence and tool-definition churn\nfor popular MCP server npm packages.\n\nSAFETY: this script never executes package code. It reads registry metadata over HTTPS,\ndownloads published tarballs from the registry's own `dist.tarball` URL and reads the\nfiles inside them as text. No node, no npm install, no npx, no lifecycle scripts.\n\nReproduce:\n    .venv/bin/python scripts/research/npm_tool_churn.py         --as-of 2026-09-29 --out docs/research-data/npm-tool-churn-2026-09-29.json\n\nMethod (recorded in the output JSON as well):\n  * Package list: official vendor or MCP-project stdio servers on npm, ranked by npm weekly\n    downloads for 2026-09-21..27 (api.npmjs.org/downloads/point/last-week). The weekly\n    figure is re-fetched at run time and stored beside each package.\n  * Install line: every mention of the package in the README published on npm (packument\n    `readme` field, i.e. what https://www.npmjs.com/package/<name> shows) that sits on an\n    `npx` line or inside a JSON `args` array. Unpinned = no version or `@latest`.\n  * Cadence: versions whose publish time in the packument `time` map falls in the 90 days\n    before --as-of.\n  * Churn: tool definitions statically extracted from the tarball of the current `latest`\n    and of the version that was newest on (as-of minus 90 days). A tool is a string-literal\n    `name` followed, within the same object, by a string-literal `description`, where the\n    object also carries `inputSchema`/`input_schema`/`parameters`/`annotations`/`handler`;\n    or a `registerTool(\"name\", {... description ...})` / `.tool(\"name\", \"description\", ...)`\n    call. Descriptions are compared after whitespace normalisation of the first literal.\n    Anything not matching is reported as not statically extractable - never guessed.\n",
+  "excluded_from_top30": {
+    "@storybook/mcp": "library consumed by @storybook/addon-mcp; not a server users install with npx",
+    "@posthog/mcp": "PostHog's MCP analytics/instrumentation SDK (depends on @posthog/core); not a server",
+    "mcp-remote": "stdio-to-remote proxy, not a server with its own tools",
+    "@ai-sdk/mcp": "client library"
+  },
+  "non_tools_removed": {
+    "@mastra/mcp-docs-server": [
+      "migration-checklist"
+    ]
+  },
+  "packages": [
+    {
+      "package": "@playwright/mcp",
+      "npm_url": "https://www.npmjs.com/package/@playwright/mcp",
+      "weekly_downloads": 7629601,
+      "latest": "0.0.82",
+      "latest_published": "2026-09-18T23:38:28.161Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/microsoft/playwright-mcp.git",
+      "versions_last_window": 62,
+      "stable_versions_last_window": 5,
+      "readme_source": "README in @playwright/mcp@0.0.82 tarball (as shown on npmjs.com)",
+      "readme_chars": 66651,
+      "install_lines": [
+        {
+          "line_no": 40,
+          "line": "\"@playwright/mcp@latest\"",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 59,
+          "line": "\"@playwright/mcp@latest\"",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 70,
+          "line": "amp mcp add playwright -- npx @playwright/mcp@latest",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 86,
+          "line": "\"@playwright/mcp@latest\"",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 101,
+          "line": "claude mcp add playwright npx @playwright/mcp@latest",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 130,
+          "line": "\"@playwright/mcp@latest\"",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 146,
+          "line": "codex mcp add playwright npx \"@playwright/mcp@latest\"",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 182,
+          "line": "\"@playwright/mcp@latest\"",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 202,
+          "line": "Go to `Cursor Settings` -> `MCP` -> `Add new MCP Server`. Name to your liking, use `command` type with the command `npx @playwright/mcp@latest`. You can also verify config or add command like argument",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 212,
+          "line": "droid mcp add playwright \"npx @playwright/mcp@latest\"",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 237,
+          "line": "Go to `Advanced settings` -> `Extensions` -> `Add custom extension`. Name to your liking, use type `STDIO`, and set the `command` to `npx @playwright/mcp`. Click \"Add Extension\".",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 246,
+          "line": "grok mcp add playwright -- npx @playwright/mcp@latest",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 279,
+          "line": "\"@playwright/mcp@latest\"",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 303,
+          "line": "\"@playwright/mcp@latest\"",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 367,
+          "line": "code --add-mcp '{\"name\":\"playwright\",\"command\":\"npx\",\"args\":[\"@playwright/mcp@latest\"]}'",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 385,
+          "line": "\"@playwright/mcp@latest\"",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 500,
+          "line": "\"@playwright/mcp@latest\",",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 548,
+          "line": "npx @playwright/mcp@latest --config path/to/config.json",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 808,
+          "line": "npx @playwright/mcp@latest --port 8931",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 18,
+      "bare_unversioned_lines": 1,
+      "dist_tags": {
+        "next": "0.0.79-alpha-1787869812000",
+        "latest": "0.0.82"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "0.0.77",
+      "baseline_published": "2026-06-29T23:08:03.643Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 77,
+        "tools_after": 83,
+        "added": [
+          "browser_emulate_media",
+          "browser_find",
+          "browser_start_recording",
+          "browser_stop_recording",
+          "browser_webmcp_call",
+          "browser_webmcp_list"
+        ],
+        "removed": [],
+        "description_changed": [
+          "browser_video_show_actions"
+        ],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "0.0.77": "32a2d506d50ebc7025f48bdb1c9ba6fecbc31e416e32c56d5c848504e023f984",
+          "0.0.82": "f668e5a4ebce36b8741af2785a9b6f82edc18e35132b2dc22a8b581c655d4ede"
+        },
+        "followed_dependencies": {
+          "before": {
+            "playwright-core": {
+              "spec": "1.62.0-alpha-2026-06-29",
+              "resolved": "1.62.0-alpha-2026-06-29",
+              "sha256": "591921464d5907f62cfb0ea4e56ac274f95b74a2c53b50888608cfcc0571b948",
+              "tools": 77
+            }
+          },
+          "after": {
+            "playwright-core": {
+              "spec": "1.64.0-alpha-1789764292000",
+              "resolved": "1.64.0-alpha-1789764292000",
+              "sha256": "713e19087fa2ec05eeb0c60341d7488a5e4160149fe0fa20652c210626b46161",
+              "tools": 83
+            }
+          }
+        },
+        "tool_names_after": [
+          "browser_annotate",
+          "browser_check",
+          "browser_click",
+          "browser_close",
+          "browser_console_clear",
+          "browser_console_messages",
+          "browser_cookie_clear",
+          "browser_cookie_delete",
+          "browser_cookie_get",
+          "browser_cookie_list",
+          "browser_cookie_set",
+          "browser_drag",
+          "browser_drop",
+          "browser_emulate_media",
+          "browser_evaluate",
+          "browser_file_upload",
+          "browser_fill_form",
+          "browser_find",
+          "browser_generate_locator",
+          "browser_get_config",
+          "browser_handle_dialog",
+          "browser_hide_highlight",
+          "browser_highlight",
+          "browser_hover",
+          "browser_keydown",
+          "browser_keyup",
+          "browser_localstorage_clear",
+          "browser_localstorage_delete",
+          "browser_localstorage_get",
+          "browser_localstorage_list",
+          "browser_localstorage_set",
+          "browser_mouse_click_xy",
+          "browser_mouse_down",
+          "browser_mouse_drag_xy",
+          "browser_mouse_move_xy",
+          "browser_mouse_up",
+          "browser_mouse_wheel",
+          "browser_navigate",
+          "browser_navigate_back",
+          "browser_navigate_forward",
+          "browser_network_clear",
+          "browser_network_request",
+          "browser_network_requests",
+          "browser_network_state_set",
+          "browser_pdf_save",
+          "browser_press_key",
+          "browser_press_sequentially",
+          "browser_reload",
+          "browser_resize",
+          "browser_resume",
+          "browser_route",
+          "browser_route_list",
+          "browser_run_code_unsafe",
+          "browser_select_option",
+          "browser_sessionstorage_clear",
+          "browser_sessionstorage_delete",
+          "browser_sessionstorage_get",
+          "browser_sessionstorage_list",
+          "browser_sessionstorage_set",
+          "browser_set_storage_state",
+          "browser_snapshot",
+          "browser_start_recording",
+          "browser_start_tracing",
+          "browser_start_video",
+          "browser_stop_recording",
+          "browser_stop_tracing",
+          "browser_stop_video",
+          "browser_storage_state",
+          "browser_tabs",
+          "browser_take_screenshot",
+          "browser_type",
+          "browser_uncheck",
+          "browser_unroute",
+          "browser_verify_element_visible",
+          "browser_verify_list_visible",
+          "browser_verify_text_visible",
+          "browser_verify_value",
+          "browser_video_chapter",
+          "browser_video_hide_actions",
+          "browser_video_show_actions",
+          "browser_wait_for",
+          "browser_webmcp_call",
+          "browser_webmcp_list"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "chrome-devtools-mcp",
+      "npm_url": "https://www.npmjs.com/package/chrome-devtools-mcp",
+      "weekly_downloads": 3138727,
+      "latest": "1.10.1",
+      "latest_published": "2026-09-23T10:42:53.202Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/ChromeDevTools/chrome-devtools-mcp.git",
+      "versions_last_window": 7,
+      "stable_versions_last_window": 7,
+      "readme_source": "README in chrome-devtools-mcp@1.10.1 tarball (as shown on npmjs.com)",
+      "readme_chars": 6445,
+      "install_lines": [
+        {
+          "line_no": 48,
+          "line": "\"args\": [\"-y\", \"chrome-devtools-mcp@latest\", \"--no-usage-statistics\"]",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 77,
+          "line": "\"args\": [\"-y\", \"chrome-devtools-mcp@latest\"]",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 93,
+          "line": "\"args\": [\"-y\", \"chrome-devtools-mcp@latest\", \"--slim\", \"--headless\"]",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 3,
+      "bare_unversioned_lines": 0,
+      "dist_tags": {
+        "latest": "1.10.1"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "1.4.0",
+      "baseline_published": "2026-06-23T07:22:26.127Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 54,
+        "tools_after": 67,
+        "added": [
+          "compare_heapsnapshots",
+          "get_css_styles",
+          "get_devtools_comments",
+          "get_heapsnapshot_duplicate_strings",
+          "get_heapsnapshot_object_details",
+          "get_os_app_state",
+          "install_pwa",
+          "launch_pwa",
+          "open_devtools",
+          "query_heapsnapshot_objects",
+          "resolve_devtools_comment",
+          "reveal_in_devtools",
+          "uninstall_pwa"
+        ],
+        "removed": [],
+        "description_changed": [
+          "emulate",
+          "evaluate_script",
+          "get_heapsnapshot_summary",
+          "get_network_request",
+          "list_3p_developer_tools",
+          "list_network_requests",
+          "performance_start_trace",
+          "performance_stop_trace",
+          "resize_page",
+          "screencast_start",
+          "screencast_stop",
+          "take_heapsnapshot",
+          "take_snapshot"
+        ],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "1.4.0": "d2d44d9a73da4992082c1f1685fbc4a1369417670d4a9948d30ecbef41419999",
+          "1.10.1": "012cbcf6e832d4f6709dad0c21d7bef17089e94adee9cf33179d15ea0a9adf2b"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "click",
+          "click_at",
+          "close_heapsnapshot",
+          "close_page",
+          "compare_heapsnapshots",
+          "drag",
+          "emulate",
+          "evaluate",
+          "evaluate_script",
+          "execute_3p_developer_tool",
+          "execute_webmcp_tool",
+          "fill",
+          "fill_form",
+          "get_console_message",
+          "get_css_styles",
+          "get_devtools_comments",
+          "get_heapsnapshot_class_nodes",
+          "get_heapsnapshot_details",
+          "get_heapsnapshot_dominators",
+          "get_heapsnapshot_duplicate_strings",
+          "get_heapsnapshot_edges",
+          "get_heapsnapshot_object_details",
+          "get_heapsnapshot_retainers",
+          "get_heapsnapshot_retaining_paths",
+          "get_heapsnapshot_summary",
+          "get_network_request",
+          "get_os_app_state",
+          "get_tab_id",
+          "handle_dialog",
+          "hover",
+          "input",
+          "install_extension",
+          "install_pwa",
+          "launch_pwa",
+          "lighthouse_audit",
+          "list_3p_developer_tools",
+          "list_extensions",
+          "list_network_requests",
+          "list_pages",
+          "list_webmcp_tools",
+          "navigate",
+          "navigate_page",
+          "new_page",
+          "open_devtools",
+          "params",
+          "performance_analyze_insight",
+          "performance_start_trace",
+          "performance_stop_trace",
+          "press_key",
+          "query_heapsnapshot_objects",
+          "reload_extension",
+          "resize_page",
+          "resolve_devtools_comment",
+          "reveal_in_devtools",
+          "screencast_start",
+          "screencast_stop",
+          "screenshot",
+          "select_page",
+          "take_heapsnapshot",
+          "take_screenshot",
+          "take_snapshot",
+          "trigger_extension_action",
+          "type_text",
+          "uninstall_extension",
+          "uninstall_pwa",
+          "upload_file",
+          "wait_for"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@modelcontextprotocol/server-filesystem",
+      "npm_url": "https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem",
+      "weekly_downloads": 624049,
+      "latest": "2026.8.31",
+      "latest_published": "2026-08-31T20:25:55.419Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/modelcontextprotocol/servers.git",
+      "versions_last_window": 3,
+      "stable_versions_last_window": 3,
+      "readme_source": "README in @modelcontextprotocol/server-filesystem@2026.8.31 tarball (as shown on npmjs.com)",
+      "readme_chars": 15018,
+      "install_lines": [
+        {
+          "line_no": 249,
+          "line": "\"@modelcontextprotocol/server-filesystem\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 269,
+          "line": "\"@modelcontextprotocol/server-filesystem\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 328,
+          "line": "\"@modelcontextprotocol/server-filesystem\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 347,
+          "line": "\"@modelcontextprotocol/server-filesystem\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 4,
+      "dist_tags": {
+        "latest": "2026.8.31"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "2026.1.14",
+      "baseline_published": "2026-01-14T16:03:10.655Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 14,
+        "tools_after": 14,
+        "added": [],
+        "removed": [],
+        "description_changed": [
+          "read_media_file"
+        ],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "2026.1.14": "e5635c070c21c4f5017260d2fb74df423d3339c2fa2eede862e5731aebf69eac",
+          "2026.8.31": "a239da270c403c42eb03e1ca7cca07c858085819797b74856ddbb91b50491b1a"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "create_directory",
+          "directory_tree",
+          "edit_file",
+          "get_file_info",
+          "list_allowed_directories",
+          "list_directory",
+          "list_directory_with_sizes",
+          "move_file",
+          "read_file",
+          "read_media_file",
+          "read_multiple_files",
+          "read_text_file",
+          "search_files",
+          "write_file"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@upstash/context7-mcp",
+      "npm_url": "https://www.npmjs.com/package/@upstash/context7-mcp",
+      "weekly_downloads": 452749,
+      "latest": "4.1.1",
+      "latest_published": "2026-09-14T14:52:39.435Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/upstash/context7.git",
+      "versions_last_window": 13,
+      "stable_versions_last_window": 13,
+      "readme_source": "README in @upstash/context7-mcp@4.1.1 tarball (as shown on npmjs.com)",
+      "readme_chars": 54439,
+      "install_lines": [
+        {
+          "line_no": 84,
+          "line": "npx -y @smithery/cli@latest install @upstash/context7-mcp --client <CLIENT_NAME> --key <YOUR_SMITHERY_KEY>",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 126,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 142,
+          "line": "claude mcp add --scope user context7 -- npx -y @upstash/context7-mcp --api-key YOUR_API_KEY",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 201,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 241,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 296,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 318,
+          "line": "npx -y @upstash/context7-mcp@latest",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 341,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 449,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 485,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 522,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 561,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 587,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 622,
+          "line": "\"command\": [\"npx\", \"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 706,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 758,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 796,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 816,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 833,
+          "line": "\"npm:@upstash/context7-mcp\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 950,
+          "line": "\"args\": [\"/c\", \"npx\", \"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 970,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 991,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1060,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1089,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1131,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1173,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1191,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1231,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1252,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1277,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1311,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\", \"--api-key\", \"YOUR_API_KEY\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1344,
+          "line": "droid mcp add context7 \"npx -y @upstash/context7-mcp\" --env CONTEXT7_API_KEY=YOUR_API_KEY",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1375,
+          "line": "autohand mcp add context7 npx -y @upstash/context7-mcp --api-key YOUR_API_KEY",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1484,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1653,
+          "line": "npx -y @modelcontextprotocol/inspector npx @upstash/context7-mcp",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1670,
+          "line": "\"args\": [\"-y\", \"@upstash/context7-mcp\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1690,
+          "line": "\"args\": [\"-y\", \"--node-options=--experimental-vm-modules\", \"@upstash/context7-mcp@1.0.6\"]",
+          "version_spec": "1.0.6",
+          "kind": "pinned"
+        },
+        {
+          "line_no": 1708,
+          "line": "\"args\": [\"-y\", \"--node-options=--experimental-fetch\", \"@upstash/context7-mcp\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "mixed",
+      "explicit_latest_lines": 1,
+      "bare_unversioned_lines": 36,
+      "dist_tags": {
+        "canary": "2.1.0-canary-20260108172005",
+        "latest": "4.1.1"
+      },
+      "remote_endpoint_in_readme": true,
+      "baseline_version": "3.2.2",
+      "baseline_published": "2026-06-22T09:45:02.463Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 2,
+        "tools_after": 2,
+        "added": [],
+        "removed": [],
+        "description_changed": [],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "3.2.2": "e15587aa847d7e57817020973ead25334f95cde22831a7fb093c98ba9954875d",
+          "4.1.1": "cbd5f81ca37b42ad5491099017b00d12107eb075bb3111c7a216b632fac97c4a"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "query-docs",
+          "resolve-library-id"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@modelcontextprotocol/server-everything",
+      "npm_url": "https://www.npmjs.com/package/@modelcontextprotocol/server-everything",
+      "weekly_downloads": 297424,
+      "latest": "2026.8.31",
+      "latest_published": "2026-08-31T20:23:50.168Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/modelcontextprotocol/servers.git",
+      "versions_last_window": 3,
+      "stable_versions_last_window": 3,
+      "readme_source": "README in @modelcontextprotocol/server-everything@2026.8.31 tarball (as shown on npmjs.com)",
+      "readme_chars": 5195,
+      "install_lines": [
+        {
+          "line_no": 27,
+          "line": "\"@modelcontextprotocol/server-everything\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 45,
+          "line": "\"@modelcontextprotocol/server-everything\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 77,
+          "line": "\"args\": [\"-y\", \"@modelcontextprotocol/server-everything\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 90,
+          "line": "\"args\": [\"/c\", \"npx\", \"-y\", \"@modelcontextprotocol/server-everything\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 120,
+          "line": "npx @modelcontextprotocol/server-everything",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 125,
+          "line": "npx @modelcontextprotocol/server-everything stdio",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 130,
+          "line": "npx @modelcontextprotocol/server-everything sse",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 135,
+          "line": "npx @modelcontextprotocol/server-everything streamableHttp",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 8,
+      "dist_tags": {
+        "latest": "2026.8.31"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "2026.1.26",
+      "baseline_published": "2026-01-27T09:25:57.675Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 17,
+        "tools_after": 18,
+        "added": [
+          "trigger-url-elicitation"
+        ],
+        "removed": [],
+        "description_changed": [],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "2026.1.26": "5bb07f3df99b8466edab25401aa7cf4d61b3f86faca5458c9a13f733fe8da383",
+          "2026.8.31": "c293b5e0ed41ed1eaba712e55929846eec78315475ce5751bdc3f8671e5383d6"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "echo",
+          "get-annotated-message",
+          "get-env",
+          "get-resource-links",
+          "get-resource-reference",
+          "get-roots-list",
+          "get-structured-content",
+          "get-sum",
+          "get-tiny-image",
+          "gzip-file-as-resource",
+          "toggle-simulated-logging",
+          "toggle-subscriber-updates",
+          "trigger-elicitation-request",
+          "trigger-elicitation-request-async",
+          "trigger-long-running-operation",
+          "trigger-sampling-request",
+          "trigger-sampling-request-async",
+          "trigger-url-elicitation"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@notionhq/notion-mcp-server",
+      "npm_url": "https://www.npmjs.com/package/@notionhq/notion-mcp-server",
+      "weekly_downloads": 216863,
+      "latest": "2.5.2",
+      "latest_published": "2026-09-20T23:10:37.446Z",
+      "deprecated_latest": null,
+      "repository": "git+ssh://git@github.com/makenotion/notion-mcp-server.git",
+      "versions_last_window": 3,
+      "stable_versions_last_window": 3,
+      "readme_source": "README in @notionhq/notion-mcp-server@2.5.2 tarball (as shown on npmjs.com)",
+      "readme_chars": 17489,
+      "install_lines": [
+        {
+          "line_no": 145,
+          "line": "\"args\": [\"-y\", \"@notionhq/notion-mcp-server\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 161,
+          "line": "\"args\": [\"-y\", \"@notionhq/notion-mcp-server\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 180,
+          "line": "\"args\": [\"-y\", \"@notionhq/notion-mcp-server\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 206,
+          "line": "\"args\": [\"-y\", \"@notionhq/notion-mcp-server\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 339,
+          "line": "npx @notionhq/notion-mcp-server",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 342,
+          "line": "npx @notionhq/notion-mcp-server --transport stdio",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 351,
+          "line": "npx @notionhq/notion-mcp-server --transport http",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 354,
+          "line": "npx @notionhq/notion-mcp-server --transport http --port 8080",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 357,
+          "line": "npx @notionhq/notion-mcp-server --transport http --host 0.0.0.0",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 360,
+          "line": "npx @notionhq/notion-mcp-server --transport http --auth-token \"your-secret-token\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 372,
+          "line": "npx @notionhq/notion-mcp-server --transport http",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 384,
+          "line": "npx @notionhq/notion-mcp-server --transport http --auth-token \"your-secret-token\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 390,
+          "line": "AUTH_TOKEN=\"your-secret-token\" npx @notionhq/notion-mcp-server --transport http",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 400,
+          "line": "npx @notionhq/notion-mcp-server --transport http --unsafe-disable-auth",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 431,
+          "line": "npx @notionhq/notion-mcp-server --transport http --enable-token-passthrough",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 501,
+          "line": "npx -y --prefix /path/to/local/notion-mcp-server @notionhq/notion-mcp-server",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 16,
+      "dist_tags": {
+        "latest": "2.5.2"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "2.4.1",
+      "baseline_published": "2026-06-22T18:15:34.874Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 24,
+        "tools_after": 24,
+        "added": [],
+        "removed": [],
+        "description_changed": [],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "2.4.1": "3ed924378048bcc28af97a2b22c505002c34b86e9e8d67664a0678fa7a312d8d",
+          "2.5.2": "2506106e21e2487531d106cf0b37cd3b1b18913c91dc141719f1c05b91f8bbce"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "create-a-comment",
+          "create-a-data-source",
+          "delete-a-block",
+          "get-block-children",
+          "get-self",
+          "get-user",
+          "get-users",
+          "list-data-source-templates",
+          "move-page",
+          "patch-block-children",
+          "patch-page",
+          "post-page",
+          "post-search",
+          "query-data-source",
+          "retrieve-a-block",
+          "retrieve-a-comment",
+          "retrieve-a-data-source",
+          "retrieve-a-database",
+          "retrieve-a-page",
+          "retrieve-a-page-property",
+          "retrieve-page-markdown",
+          "update-a-block",
+          "update-a-data-source",
+          "update-page-markdown"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "firecrawl-mcp",
+      "npm_url": "https://www.npmjs.com/package/firecrawl-mcp",
+      "weekly_downloads": 190664,
+      "latest": "3.25.5",
+      "latest_published": "2026-09-25T05:06:17.284Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/firecrawl/firecrawl-mcp-server.git",
+      "versions_last_window": 18,
+      "stable_versions_last_window": 18,
+      "readme_source": "README in firecrawl-mcp@3.25.5 tarball (as shown on npmjs.com)",
+      "readme_chars": 51309,
+      "install_lines": [
+        {
+          "line_no": 89,
+          "line": "env FIRECRAWL_API_KEY=fc-YOUR_API_KEY npx -y firecrawl-mcp",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 116,
+          "line": "\"args\": [\"-y\", \"firecrawl-mcp\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 133,
+          "line": "- Command: `env FIRECRAWL_API_KEY=your-api-key npx -y firecrawl-mcp`",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 135,
+          "line": "> If you are using Windows and are running into issues, try `cmd /c \"set FIRECRAWL_API_KEY=your-api-key && npx -y firecrawl-mcp\"`",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 150,
+          "line": "\"args\": [\"-y\", \"firecrawl-mcp\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 164,
+          "line": "env HTTP_STREAMABLE_SERVER=true FIRECRAWL_API_KEY=fc-YOUR_API_KEY npx -y firecrawl-mcp",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 199,
+          "line": "\"args\": [\"-y\", \"firecrawl-mcp\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 224,
+          "line": "\"args\": [\"-y\", \"firecrawl-mcp\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 290,
+          "line": "\"args\": [\"-y\", \"firecrawl-mcp\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 661,
+          "line": "**Hosted MCP flow:** Hosted MCP cannot read the caller's filesystem directly. Call `firecrawl_parse` with `filePath` to receive a short-lived upload command and `nextToolCall`, upload the file locally",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 10,
+      "dist_tags": {
+        "beta": "3.1.12",
+        "latest": "3.25.5"
+      },
+      "remote_endpoint_in_readme": true,
+      "baseline_version": "3.22.2",
+      "baseline_published": "2026-06-30T14:01:27.165Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 26,
+        "tools_after": 29,
+        "added": [
+          "firecrawl_credit_usage",
+          "firecrawl_developer_search",
+          "firecrawl_find_tools"
+        ],
+        "removed": [],
+        "description_changed": [
+          "firecrawl_agent",
+          "firecrawl_agent_status",
+          "firecrawl_check_crawl_status",
+          "firecrawl_crawl",
+          "firecrawl_extract",
+          "firecrawl_feedback",
+          "firecrawl_interact",
+          "firecrawl_interact_stop",
+          "firecrawl_map",
+          "firecrawl_monitor_check",
+          "firecrawl_monitor_checks",
+          "firecrawl_monitor_create",
+          "firecrawl_monitor_delete",
+          "firecrawl_monitor_get",
+          "firecrawl_monitor_list",
+          "firecrawl_monitor_run",
+          "firecrawl_monitor_update",
+          "firecrawl_parse",
+          "firecrawl_research_inspect_paper",
+          "firecrawl_research_read_paper",
+          "firecrawl_research_related_papers",
+          "firecrawl_research_search_github",
+          "firecrawl_research_search_papers",
+          "firecrawl_scrape",
+          "firecrawl_search",
+          "firecrawl_search_feedback"
+        ],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "3.22.2": "969dfb97b1ce95c49d80a1fa378e99ec1ddb68e797de9c6e3ff0441ee0b14943",
+          "3.25.5": "d1d2137fdd163afafce5a2c46d644d13ab1a211ac49a64f450011e60015d8821"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "firecrawl_agent",
+          "firecrawl_agent_status",
+          "firecrawl_check_crawl_status",
+          "firecrawl_crawl",
+          "firecrawl_credit_usage",
+          "firecrawl_developer_search",
+          "firecrawl_extract",
+          "firecrawl_feedback",
+          "firecrawl_find_tools",
+          "firecrawl_interact",
+          "firecrawl_interact_stop",
+          "firecrawl_map",
+          "firecrawl_monitor_check",
+          "firecrawl_monitor_checks",
+          "firecrawl_monitor_create",
+          "firecrawl_monitor_delete",
+          "firecrawl_monitor_get",
+          "firecrawl_monitor_list",
+          "firecrawl_monitor_run",
+          "firecrawl_monitor_update",
+          "firecrawl_parse",
+          "firecrawl_research_inspect_paper",
+          "firecrawl_research_read_paper",
+          "firecrawl_research_related_papers",
+          "firecrawl_research_search_github",
+          "firecrawl_research_search_papers",
+          "firecrawl_scrape",
+          "firecrawl_search",
+          "firecrawl_search_feedback"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@azure/mcp",
+      "npm_url": "https://www.npmjs.com/package/@azure/mcp",
+      "weekly_downloads": 169774,
+      "latest": "3.0.0-beta.47",
+      "latest_published": "2026-09-24T23:29:38.845Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/microsoft/mcp.git",
+      "versions_last_window": 27,
+      "stable_versions_last_window": 1,
+      "readme_source": "README in @azure/mcp@3.0.0-beta.47 tarball (as shown on npmjs.com)",
+      "readme_chars": 45511,
+      "install_lines": [
+        {
+          "line_no": 42,
+          "line": "\"@azure/mcp@latest\",",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 1,
+      "bare_unversioned_lines": 0,
+      "dist_tags": {
+        "latest": "3.0.0-beta.47"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "2.0.4",
+      "baseline_published": "2026-06-16T22:02:33.978Z",
+      "churn": {
+        "status": "not_statically_extractable",
+        "tools_found": [
+          0,
+          0
+        ],
+        "files_scanned": [
+          2,
+          2
+        ]
+      },
+      "churn_reliability": "unreliable",
+      "churn_reliability_note": "tools ship in native platform binaries (@azure/mcp-<os>-<arch>)"
+    },
+    {
+      "package": "@modelcontextprotocol/server-memory",
+      "npm_url": "https://www.npmjs.com/package/@modelcontextprotocol/server-memory",
+      "weekly_downloads": 163576,
+      "latest": "2026.8.31",
+      "latest_published": "2026-08-31T20:23:48.078Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/modelcontextprotocol/servers.git",
+      "versions_last_window": 2,
+      "stable_versions_last_window": 2,
+      "readme_source": "README in @modelcontextprotocol/server-memory@2026.8.31 tarball (as shown on npmjs.com)",
+      "readme_chars": 10667,
+      "install_lines": [
+        {
+          "line_no": 165,
+          "line": "\"@modelcontextprotocol/server-memory\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 183,
+          "line": "\"@modelcontextprotocol/server-memory\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 201,
+          "line": "\"@modelcontextprotocol/server-memory\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 222,
+          "line": "\"@modelcontextprotocol/server-memory\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 261,
+          "line": "\"@modelcontextprotocol/server-memory\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 279,
+          "line": "\"@modelcontextprotocol/server-memory\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 6,
+      "dist_tags": {
+        "latest": "2026.8.31"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "2026.1.26",
+      "baseline_published": "2026-01-27T09:25:54.132Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 9,
+        "tools_after": 9,
+        "added": [],
+        "removed": [],
+        "description_changed": [],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "2026.1.26": "703f627b1670167574a1f119031816481be010d68b72ff09ca9b99d71e5ef524",
+          "2026.8.31": "53a606a0e2d8622214808c85e9986db08ff343520d95b64d386039d024eb504c"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "add_observations",
+          "create_entities",
+          "create_relations",
+          "delete_entities",
+          "delete_observations",
+          "delete_relations",
+          "open_nodes",
+          "read_graph",
+          "search_nodes"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@sentry/mcp-server",
+      "npm_url": "https://www.npmjs.com/package/@sentry/mcp-server",
+      "weekly_downloads": 155318,
+      "latest": "0.42.0",
+      "latest_published": "2026-09-25T14:49:02.686Z",
+      "deprecated_latest": null,
+      "repository": "git+ssh://git@github.com/getsentry/sentry-mcp.git",
+      "versions_last_window": 6,
+      "stable_versions_last_window": 6,
+      "readme_source": "https://raw.githubusercontent.com/getsentry/sentry-mcp/main/README.md (fetched 2026-09-29; npm README has no install line)",
+      "readme_chars": 28,
+      "install_lines": [
+        {
+          "line_no": 52,
+          "line": "npx @sentry/mcp-server@latest --access-token=sentry-user-token",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 65,
+          "line": "npx @sentry/mcp-server@latest --access-token=TOKEN --host=sentry.example.com --skills=inspect,seer",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 72,
+          "line": "npx @sentry/mcp-server@latest --access-token=TOKEN --host=sentry.example.com --disable-skills=project-management",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 78,
+          "line": "npx @sentry/mcp-server@latest --access-token=TOKEN --host=sentry.internal:9000 --insecure-http",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 136,
+          "line": "\"args\": [\"@sentry/mcp-server\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 159,
+          "line": "\"args\": [\"@sentry/mcp-server\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 4,
+      "bare_unversioned_lines": 2,
+      "dist_tags": {
+        "latest": "0.42.0"
+      },
+      "remote_endpoint_in_readme": true,
+      "baseline_version": "0.36.0",
+      "baseline_published": "2026-06-08T19:45:28.379Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 1,
+        "tools_after": 2,
+        "added": [
+          "deploy"
+        ],
+        "removed": [],
+        "description_changed": [],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "0.36.0": "5b48c01eeac87a081a94e40872d116ad0c165f33420c0f8c9a9f47bc076d8a60",
+          "0.42.0": "edca513afe52b7cff5da482b647a05711e9282ca7cebdc312ce6cf3386cf0a8b"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "deploy",
+          "json"
+        ]
+      },
+      "churn_reliability": "unreliable",
+      "churn_reliability_note": "only 'json'/'deploy' matched; neither is an MCP tool"
+    },
+    {
+      "package": "mongodb-mcp-server",
+      "npm_url": "https://www.npmjs.com/package/mongodb-mcp-server",
+      "weekly_downloads": 136172,
+      "latest": "3.0.4",
+      "latest_published": "2026-09-21T08:45:18.852Z",
+      "deprecated_latest": null,
+      "repository": "https://github.com/mongodb-js/mongodb-mcp-server.git",
+      "versions_last_window": 35,
+      "stable_versions_last_window": 10,
+      "readme_source": "README in mongodb-mcp-server@3.0.4 tarball (as shown on npmjs.com)",
+      "readme_chars": 104840,
+      "install_lines": [
+        {
+          "line_no": 37,
+          "line": "npx -y mongodb-mcp-server@latest setup",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 119,
+          "line": "\"args\": [\"-y\", \"mongodb-mcp-server@latest\", \"--readOnly\"],",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 168,
+          "line": "\"args\": [\"-y\", \"mongodb-mcp-server@latest\", \"--readOnly\"],",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 188,
+          "line": "npx -y mongodb-mcp-server@latest --readOnly",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 260,
+          "line": "\"mongodb/mongodb-mcp-server:latest\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 282,
+          "line": "\"mongodb/mongodb-mcp-server:latest\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 309,
+          "line": "\"mongodb/mongodb-mcp-server:latest\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 482,
+          "line": "npx -y mongodb-mcp-server@latest --loggers mcp stderr",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 623,
+          "line": "npx -y mongodb-mcp-server@latest --transport http --httpHost 0.0.0.0 --httpPort 3000 --monitoringServerHost 0.0.0.0 --monitoringServerPort 8080 &",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 631,
+          "line": "npx -y mongodb-mcp-server@latest --transport http --monitoringServerHost 0.0.0.0 --monitoringServerPort 8080 --monitoringServerFeatures health-check,metrics",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 720,
+          "line": "npx -y mongodb-mcp-server@latest",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 727,
+          "line": "npx -y mongodb-mcp-server@latest",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 734,
+          "line": "npx -y mongodb-mcp-server@latest",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 789,
+          "line": "\"args\": [\"-y\", \"mongodb-mcp-server\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 805,
+          "line": "\"args\": [\"-y\", \"mongodb-mcp-server\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 828,
+          "line": "npx -y mongodb-mcp-server@latest --logPath=/path/to/logs --readOnly --indexCheck",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 846,
+          "line": "\"mongodb-mcp-server\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 866,
+          "line": "\"mongodb-mcp-server\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 932,
+          "line": "The **CLI tool** (`mongodb-mcp-server` / `npx mongodb-mcp-server`) is designed for **single-user, localhost (or private) deployments** where the operating user is the only principal. It ships with **n",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 932,
+          "line": "The **CLI tool** (`mongodb-mcp-server` / `npx mongodb-mcp-server`) is designed for **single-user, localhost (or private) deployments** where the operating user is the only principal. It ships with **n",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 11,
+      "bare_unversioned_lines": 9,
+      "dist_tags": {
+        "pre": "1.8.1-pre.1",
+        "prererelease": "1.9.0-prererelease.2",
+        "alpha": "2.0.1-alpha.5",
+        "prerelease": "3.0.0-prerelease.6",
+        "latest": "3.0.4",
+        "v2": "2.1.2"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "1.13.0",
+      "baseline_published": "2026-06-16T10:08:09.389Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 49,
+        "tools_after": 50,
+        "added": [
+          "atlas-get-regions",
+          "disconnect",
+          "list-connections"
+        ],
+        "removed": [
+          "export",
+          "switch-connection"
+        ],
+        "description_changed": [
+          "atlas-connect-cluster",
+          "atlas-create-cluster",
+          "atlas-list-alerts",
+          "atlas-list-projects",
+          "atlas-local-connect-deployment",
+          "atlas-upgrade-cluster",
+          "connect"
+        ],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "1.13.0": "686cbb014bc60cf322e2285b91c0f990343f0b10b17b56328de6f405e581e223",
+          "3.0.4": "5b528ead24bf5c999220c930d73f42ae8ef15e648fc4e864579b682847b401d9"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {
+            "@mongodb-js/mcp-tools-atlas": {
+              "spec": "3.0.4",
+              "resolved": "3.0.4",
+              "sha256": "3901972df390e86715cddc7bb82cca13d131419039baa07cf1a90df107745732",
+              "tools": 22
+            },
+            "@mongodb-js/mcp-tools-mongodb": {
+              "spec": "3.0.4",
+              "resolved": "3.0.4",
+              "sha256": "2bf32f7e247c740f7ad08ed06e19bef3dcc947fef9a16f596f188a20b2d620e2",
+              "tools": 24
+            },
+            "@mongodb-js/mcp-tools-assistant": {
+              "spec": "3.0.4",
+              "resolved": "3.0.4",
+              "sha256": "cab1ff6e950d8c96720f43cc09fbc16b96af96fd3994ee6da6192c72fcf2843c",
+              "tools": 0
+            },
+            "@mongodb-js/mcp-tools-atlas-local": {
+              "spec": "3.0.4",
+              "resolved": "3.0.4",
+              "sha256": "a486e74ce97b404a48ed3514f36a8c4e86ed93d2f12ee089c3bb7aa29be10025",
+              "tools": 4
+            }
+          }
+        },
+        "tool_names_after": [
+          "aggregate",
+          "aggregate-db",
+          "atlas-connect-cluster",
+          "atlas-create-access-list",
+          "atlas-create-cluster",
+          "atlas-create-db-user",
+          "atlas-create-free-cluster",
+          "atlas-create-project",
+          "atlas-get-performance-advisor",
+          "atlas-get-regions",
+          "atlas-inspect-access-list",
+          "atlas-inspect-cluster",
+          "atlas-list-alerts",
+          "atlas-list-clusters",
+          "atlas-list-db-users",
+          "atlas-list-orgs",
+          "atlas-list-projects",
+          "atlas-load-sample-dataset",
+          "atlas-local-connect-deployment",
+          "atlas-local-create-deployment",
+          "atlas-local-delete-deployment",
+          "atlas-local-list-deployments",
+          "atlas-pause-resume-cluster",
+          "atlas-streams-build",
+          "atlas-streams-discover",
+          "atlas-streams-manage",
+          "atlas-streams-teardown",
+          "atlas-upgrade-cluster",
+          "collection-indexes",
+          "collection-schema",
+          "collection-storage-size",
+          "connect",
+          "count",
+          "create-collection",
+          "create-index",
+          "db-stats",
+          "delete-many",
+          "disconnect",
+          "drop-collection",
+          "drop-database",
+          "drop-index",
+          "explain",
+          "find",
+          "insert-many",
+          "list-collections",
+          "list-connections",
+          "list-databases",
+          "mongodb-logs",
+          "rename-collection",
+          "update-many"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@modelcontextprotocol/server-github",
+      "npm_url": "https://www.npmjs.com/package/@modelcontextprotocol/server-github",
+      "weekly_downloads": 129638,
+      "latest": "2025.4.8",
+      "latest_published": "2025-04-08T10:08:59.978Z",
+      "deprecated_latest": "Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.",
+      "repository": null,
+      "versions_last_window": 0,
+      "stable_versions_last_window": 0,
+      "readme_source": "README in @modelcontextprotocol/server-github@2025.4.8 tarball (as shown on npmjs.com)",
+      "readme_chars": 13898,
+      "install_lines": [
+        {
+          "line_no": 352,
+          "line": "\"@modelcontextprotocol/server-github\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 1,
+      "dist_tags": {
+        "latest": "2025.4.8"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "2025.4.8",
+      "baseline_published": "2025-04-08T10:08:59.978Z",
+      "churn": {
+        "status": "no_release_in_window",
+        "tools_now": 26
+      },
+      "churn_reliability": "n/a"
+    },
+    {
+      "package": "@modelcontextprotocol/server-sequential-thinking",
+      "npm_url": "https://www.npmjs.com/package/@modelcontextprotocol/server-sequential-thinking",
+      "weekly_downloads": 127302,
+      "latest": "2026.8.31",
+      "latest_published": "2026-08-31T20:23:44.857Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/modelcontextprotocol/servers.git",
+      "versions_last_window": 2,
+      "stable_versions_last_window": 2,
+      "readme_source": "README in @modelcontextprotocol/server-sequential-thinking@2026.8.31 tarball (as shown on npmjs.com)",
+      "readme_chars": 7542,
+      "install_lines": [
+        {
+          "line_no": 87,
+          "line": "\"@modelcontextprotocol/server-sequential-thinking\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 105,
+          "line": "\"@modelcontextprotocol/server-sequential-thinking\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 159,
+          "line": "\"@modelcontextprotocol/server-sequential-thinking\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 177,
+          "line": "\"@modelcontextprotocol/server-sequential-thinking\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 209,
+          "line": "codex mcp add sequential-thinking npx -y @modelcontextprotocol/server-sequential-thinking",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 5,
+      "dist_tags": {
+        "latest": "2026.8.31"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "2025.12.18",
+      "baseline_published": "2025-12-18T16:05:40.713Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 1,
+        "tools_after": 1,
+        "added": [],
+        "removed": [],
+        "description_changed": [],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "2025.12.18": "5a21e6fa473722b8e622a9bbbdd72bc6dbcddf430f26ab5989cd33dfe5dc7703",
+          "2026.8.31": "b47c367af4bc1ef96cec096e67151899a29317c42009f0ac53a0d51b85c2c71d"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "sequentialthinking"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@azure-devops/mcp",
+      "npm_url": "https://www.npmjs.com/package/@azure-devops/mcp",
+      "weekly_downloads": 126228,
+      "latest": "2.10.0",
+      "latest_published": "2026-09-09T14:14:57.396Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/microsoft/azure-devops-mcp.git",
+      "versions_last_window": 83,
+      "stable_versions_last_window": 4,
+      "readme_source": "README in @azure-devops/mcp@2.10.0 tarball (as shown on npmjs.com)",
+      "readme_chars": 9081,
+      "install_lines": [
+        {
+          "line_no": 117,
+          "line": "\"args\": [\"-y\", \"@azure-devops/mcp\", \"${input:ado_org}\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 155,
+          "line": "\"args\": [\"-y\", \"@azure-devops/mcp\", \"${input:ado_org}\", \"-d\", \"core\", \"work\", \"work-items\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 177,
+          "line": "\"args\": [\"-y\", \"@azure-devops/mcp\", \"myorg\", \"--authentication\", \"azcli\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 3,
+      "dist_tags": {
+        "pre-release": "1.3.1-nightly.20250817",
+        "oauth": "0.2.0-preview-oauth",
+        "latest": "2.10.0",
+        "next": "2.10.0-nightly.20260927"
+      },
+      "remote_endpoint_in_readme": true,
+      "baseline_version": "2.7.0",
+      "baseline_published": "2026-04-23T07:48:05.442Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 92,
+        "tools_after": 36,
+        "added": [
+          "pipelines_artifact",
+          "pipelines_build",
+          "pipelines_build_log",
+          "pipelines_definition",
+          "pipelines_run",
+          "pipelines_write",
+          "repo_branch",
+          "repo_file",
+          "repo_pull_request",
+          "repo_pull_request_thread",
+          "repo_pull_request_thread_write",
+          "repo_pull_request_write",
+          "repo_repository",
+          "wiki",
+          "wiki_upsert_page",
+          "wit_backlog",
+          "wit_query",
+          "wit_work_item",
+          "wit_work_item_attachment",
+          "wit_work_item_comment_write",
+          "wit_work_item_link_write",
+          "wit_work_item_write",
+          "work",
+          "work_capacity_write",
+          "work_iteration_write"
+        ],
+        "removed": [
+          "build_get_builds",
+          "build_get_changes",
+          "build_get_definition_revisions",
+          "build_get_definitions",
+          "build_get_log",
+          "build_get_log_by_id",
+          "build_get_status",
+          "build_update_build_stage",
+          "pipelines_create_pipeline",
+          "pipelines_download_artifact",
+          "pipelines_get_build_changes",
+          "pipelines_get_build_definition_revisions",
+          "pipelines_get_build_definitions",
+          "pipelines_get_build_log",
+          "pipelines_get_build_log_by_id",
+          "pipelines_get_build_status",
+          "pipelines_get_builds",
+          "pipelines_get_run",
+          "pipelines_list_artifacts",
+          "pipelines_list_runs",
+          "pipelines_run_pipeline",
+          "pipelines_update_build_stage",
+          "release_get_definitions",
+          "release_get_releases",
+          "repo_create_pull_request",
+          "repo_create_pull_request_thread",
+          "repo_get_branch_by_name",
+          "repo_get_file_content",
+          "repo_get_pull_request_by_id",
+          "repo_get_pull_request_changes",
+          "repo_get_repo_by_name_or_id",
+          "repo_list_branches_by_repo",
+          "repo_list_directory",
+          "repo_list_my_branches_by_repo",
+          "repo_list_pull_request_thread_comments",
+          "repo_list_pull_request_threads",
+          "repo_list_pull_requests_by_commits",
+          "repo_list_pull_requests_by_repo_or_project",
+          "repo_list_repos_by_project",
+          "repo_reply_to_comment",
+          "repo_update_pull_request",
+          "repo_update_pull_request_reviewers",
+          "repo_update_pull_request_thread",
+          "repo_vote_pull_request",
+          "wiki_create_or_update_page",
+          "wiki_get_page",
+          "wiki_get_page_content",
+          "wiki_get_wiki",
+          "wiki_list_pages",
+          "wiki_list_wikis",
+          "wit_add_artifact_link",
+          "wit_add_child_work_items",
+          "wit_add_work_item_comment",
+          "wit_create_work_item",
+          "wit_get_query",
+          "wit_get_query_results_by_id",
+          "wit_get_work_item",
+          "wit_get_work_item_attachment",
+          "wit_get_work_item_type",
+          "wit_get_work_items_batch_by_ids",
+          "wit_get_work_items_for_iteration",
+          "wit_link_work_item_to_pull_request",
+          "wit_list_backlog_work_items",
+          "wit_list_backlogs",
+          "wit_list_work_item_comments",
+          "wit_list_work_item_revisions",
+          "wit_my_work_items",
+          "wit_query_by_wiql",
+          "wit_update_work_item",
+          "wit_update_work_item_comment",
+          "wit_update_work_items_batch",
+          "wit_work_item_unlink",
+          "wit_work_items_link",
+          "work_assign_iterations",
+          "work_create_iterations",
+          "work_get_iteration_capacities",
+          "work_get_team_capacity",
+          "work_get_team_settings",
+          "work_list_iterations",
+          "work_list_team_iterations",
+          "work_update_team_capacity"
+        ],
+        "description_changed": [
+          "advsec_get_alerts",
+          "repo_search_commits"
+        ],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "2.7.0": "1ebb467551ad9c6c096435ea11eee37d54433d036e78642c333c8a69772567b9",
+          "2.10.0": "b077586c502cef22fd6ec1632904708699fd7a714018a95640f9854dc10073e8"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "advsec_get_alert_details",
+          "advsec_get_alerts",
+          "core_get_identity_ids",
+          "core_list_project_teams",
+          "core_list_projects",
+          "mcp_apps_ping",
+          "pipelines_artifact",
+          "pipelines_build",
+          "pipelines_build_log",
+          "pipelines_definition",
+          "pipelines_run",
+          "pipelines_write",
+          "repo_branch",
+          "repo_create_branch",
+          "repo_file",
+          "repo_pull_request",
+          "repo_pull_request_thread",
+          "repo_pull_request_thread_write",
+          "repo_pull_request_write",
+          "repo_repository",
+          "repo_search_commits",
+          "search_code",
+          "search_wiki",
+          "search_workitem",
+          "wiki",
+          "wiki_upsert_page",
+          "wit_backlog",
+          "wit_query",
+          "wit_work_item",
+          "wit_work_item_attachment",
+          "wit_work_item_comment_write",
+          "wit_work_item_link_write",
+          "wit_work_item_write",
+          "work",
+          "work_capacity_write",
+          "work_iteration_write"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@modelcontextprotocol/server-slack",
+      "npm_url": "https://www.npmjs.com/package/@modelcontextprotocol/server-slack",
+      "weekly_downloads": 114899,
+      "latest": "2025.4.25",
+      "latest_published": "2025-04-25T08:27:22.626Z",
+      "deprecated_latest": "Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.",
+      "repository": null,
+      "versions_last_window": 0,
+      "stable_versions_last_window": 0,
+      "readme_source": "README in @modelcontextprotocol/server-slack@2025.4.25 tarball (as shown on npmjs.com)",
+      "readme_chars": 10236,
+      "install_lines": [
+        {
+          "line_no": 102,
+          "line": "\"@modelcontextprotocol/server-slack\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 178,
+          "line": "\"args\": [\"-y\", \"@modelcontextprotocol/server-slack\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 2,
+      "dist_tags": {
+        "latest": "2025.4.25"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "2025.4.25",
+      "baseline_published": "2025-04-25T08:27:22.626Z",
+      "churn": {
+        "status": "no_release_in_window",
+        "tools_now": 8
+      },
+      "churn_reliability": "n/a"
+    },
+    {
+      "package": "@modelcontextprotocol/server-postgres",
+      "npm_url": "https://www.npmjs.com/package/@modelcontextprotocol/server-postgres",
+      "weekly_downloads": 109622,
+      "latest": "0.6.2",
+      "latest_published": "2024-12-04T16:14:51.820Z",
+      "deprecated_latest": "Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.",
+      "repository": null,
+      "versions_last_window": 0,
+      "stable_versions_last_window": 0,
+      "readme_source": "README in @modelcontextprotocol/server-postgres@0.6.2 tarball (as shown on npmjs.com)",
+      "readme_chars": 1376,
+      "install_lines": [
+        {
+          "line_no": 34,
+          "line": "\"@modelcontextprotocol/server-postgres\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 1,
+      "dist_tags": {
+        "latest": "0.6.2"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "0.6.2",
+      "baseline_published": "2024-12-04T16:14:51.820Z",
+      "churn": {
+        "status": "no_release_in_window",
+        "tools_now": 1
+      },
+      "churn_reliability": "n/a"
+    },
+    {
+      "package": "@ui5/mcp-server",
+      "npm_url": "https://www.npmjs.com/package/@ui5/mcp-server",
+      "weekly_downloads": 104471,
+      "latest": "0.3.1",
+      "latest_published": "2026-09-25T08:25:59.741Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/UI5/mcp-server.git",
+      "versions_last_window": 8,
+      "stable_versions_last_window": 8,
+      "readme_source": "README in @ui5/mcp-server@0.3.1 tarball (as shown on npmjs.com)",
+      "readme_chars": 8855,
+      "install_lines": [
+        {
+          "line_no": 57,
+          "line": "\"@ui5/mcp-server\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 76,
+          "line": "\"npx -y @ui5/mcp-server\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 96,
+          "line": "code --add-mcp '{\"name\":\"@ui5/mcp-server\",\"type\": \"stdio\",\"command\":\"npx\",\"args\":[\"-y\", \"@ui5/mcp-server\"]}'",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 96,
+          "line": "code --add-mcp '{\"name\":\"@ui5/mcp-server\",\"type\": \"stdio\",\"command\":\"npx\",\"args\":[\"-y\", \"@ui5/mcp-server\"]}'",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 111,
+          "line": "claude mcp add --transport stdio --scope user ui5-mcp-server -- npx -y @ui5/mcp-server",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 117,
+          "line": "codex mcp add --transport stdio ui5-mcp-server -- npx -y @ui5/mcp-server",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 6,
+      "dist_tags": {
+        "latest": "0.3.1"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "0.2.14",
+      "baseline_published": "2026-06-23T13:07:48.005Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 10,
+        "tools_after": 10,
+        "added": [],
+        "removed": [],
+        "description_changed": [],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "0.2.14": "9df0fe64db7399680ae93f670054b4cd3bb224eaedd94208cc8eef2109f01b8e",
+          "0.3.1": "8a1ca67af5fba94abf922f54dd0df1113aaff93c8082c4b9c552fedad1644bbb"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "create_integration_card",
+          "create_ui5_app",
+          "get_api_reference",
+          "get_guidelines",
+          "get_integration_cards_guidelines",
+          "get_project_info",
+          "get_typescript_conversion_guidelines",
+          "get_version_info",
+          "run_manifest_validation",
+          "run_ui5_linter"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@supabase/mcp-server-supabase",
+      "npm_url": "https://www.npmjs.com/package/@supabase/mcp-server-supabase",
+      "weekly_downloads": 99902,
+      "latest": "0.13.0",
+      "latest_published": "2026-09-17T13:41:49.194Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/supabase/mcp.git",
+      "versions_last_window": 6,
+      "stable_versions_last_window": 6,
+      "readme_source": "https://raw.githubusercontent.com/supabase-community/supabase-mcp/main/README.md (fetched 2026-09-29; npm README has no install line)",
+      "readme_chars": 28,
+      "install_lines": [],
+      "install_verdict": "no_npx_line_in_npm_readme",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 0,
+      "dist_tags": {
+        "dev": "0.5.0-dev.3",
+        "alpha": "0.5.3-alpha.1",
+        "latest": "0.13.0"
+      },
+      "remote_endpoint_in_readme": true,
+      "baseline_version": "0.8.2",
+      "baseline_published": "2026-06-08T16:58:48.469Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 31,
+        "tools_after": 33,
+        "added": [
+          "create_edge_function_secret",
+          "query_logs"
+        ],
+        "removed": [],
+        "description_changed": [
+          "apply_migration",
+          "execute_sql",
+          "get_logs"
+        ],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "0.8.2": "bbbd4fba6b7cf55fe6fc891cf6df46a06c46eca654c91543e55fb8a8866bb1f1",
+          "0.13.0": "417aa2176381a3a4cb2ead3d30a2e0faa781bad6ca9d1677200dcc0e88aedfb1"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "apply_migration",
+          "confirm_cost",
+          "create_branch",
+          "create_edge_function_secret",
+          "create_project",
+          "delete_branch",
+          "deploy_edge_function",
+          "execute_sql",
+          "generate_typescript_types",
+          "get_advisors",
+          "get_cost",
+          "get_edge_function",
+          "get_logs",
+          "get_organization",
+          "get_project",
+          "get_project_url",
+          "get_publishable_keys",
+          "get_storage_config",
+          "list_branches",
+          "list_edge_functions",
+          "list_extensions",
+          "list_migrations",
+          "list_organizations",
+          "list_projects",
+          "list_storage_buckets",
+          "list_tables",
+          "merge_branch",
+          "pause_project",
+          "query_logs",
+          "rebase_branch",
+          "reset_branch",
+          "restore_project",
+          "update_storage_config"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "nx-mcp",
+      "npm_url": "https://www.npmjs.com/package/nx-mcp",
+      "weekly_downloads": 69972,
+      "latest": "0.25.0",
+      "latest_published": "2026-04-30T11:38:28.620Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/nrwl/nx-console.git",
+      "versions_last_window": 0,
+      "stable_versions_last_window": 0,
+      "readme_source": "README in nx-mcp@0.25.0 tarball (as shown on npmjs.com)",
+      "readme_chars": 6562,
+      "install_lines": [
+        {
+          "line_no": 29,
+          "line": "\"args\": [\"nx-mcp@latest\"]",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 39,
+          "line": "claude mcp add nx-mcp npx nx-mcp@latest",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 39,
+          "line": "claude mcp add nx-mcp npx nx-mcp@latest",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 48,
+          "line": "code --add-mcp '{\"name\":\"nx-mcp\",\"command\":\"npx\",\"args\":[\"nx-mcp\"]}'",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 48,
+          "line": "code --add-mcp '{\"name\":\"nx-mcp\",\"command\":\"npx\",\"args\":[\"nx-mcp\"]}'",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 64,
+          "line": "\"args\": [\"nx-mcp@latest\"]",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 102,
+          "line": "npx nx-mcp@latest --no-minimal",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 4,
+      "bare_unversioned_lines": 3,
+      "dist_tags": {
+        "latest": "0.25.0"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "0.25.0",
+      "baseline_published": "2026-04-30T11:38:28.620Z",
+      "churn": {
+        "status": "no_release_in_window",
+        "tools_now": 0
+      },
+      "churn_reliability": "n/a"
+    },
+    {
+      "package": "@shopify/dev-mcp",
+      "npm_url": "https://www.npmjs.com/package/@shopify/dev-mcp",
+      "weekly_downloads": 50919,
+      "latest": "1.16.0",
+      "latest_published": "2026-09-25T19:57:15.793Z",
+      "deprecated_latest": null,
+      "repository": null,
+      "versions_last_window": 13,
+      "stable_versions_last_window": 11,
+      "readme_source": "README in @shopify/dev-mcp@1.16.0 tarball (as shown on npmjs.com)",
+      "readme_chars": 3049,
+      "install_lines": [
+        {
+          "line_no": 12,
+          "line": "npx -y @shopify/dev-mcp@latest",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 22,
+          "line": "\"args\": [\"-y\", \"@shopify/dev-mcp@latest\"]",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 37,
+          "line": "\"args\": [\"/k\", \"npx\", \"-y\", \"@shopify/dev-mcp@latest\"]",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 3,
+      "bare_unversioned_lines": 0,
+      "dist_tags": {
+        "snapshot": "1.15.2-snapshot-20260917141020",
+        "latest": "1.16.0"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "1.14.2",
+      "baseline_published": "2026-06-25T18:44:32.683Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 6,
+        "tools_after": 8,
+        "added": [
+          "feedback",
+          "validate"
+        ],
+        "removed": [],
+        "description_changed": [
+          "validate_component_codeblocks"
+        ],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "1.14.2": "20897ffed6bd2bc253552dda940a8707a331a701d7c9e2deae457f761c8d5073",
+          "1.16.0": "4663c79229028e98f825a09d5f04ec6c3736331b740ce50260f9ffac10709474"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "feedback",
+          "learn_shopify_api",
+          "search_docs_chunks",
+          "validate",
+          "validate_component_codeblocks",
+          "validate_graphql_codeblocks",
+          "validate_theme",
+          "validate_theme_codeblocks"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@currents/mcp",
+      "npm_url": "https://www.npmjs.com/package/@currents/mcp",
+      "weekly_downloads": 49484,
+      "latest": "2.6.1",
+      "latest_published": "2026-09-23T07:46:19.448Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/currents-dev/currents-mcp.git",
+      "versions_last_window": 7,
+      "stable_versions_last_window": 6,
+      "readme_source": "README in @currents/mcp@2.6.1 tarball (as shown on npmjs.com)",
+      "readme_chars": 17389,
+      "install_lines": [
+        {
+          "line_no": 97,
+          "line": "\"args\": [\"-y\", \"@currents/mcp\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 111,
+          "line": "claude mcp add --transport stdio currents --env CURRENTS_API_KEY=<KEY> -- npx -y @currents/mcp",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 121,
+          "line": "\"args\": [\"-y\", \"@currents/mcp\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 139,
+          "line": "-- npx -y @currents/mcp --features evidenceSharing,aiAnalysis",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 4,
+      "dist_tags": {
+        "alpha": "2.1.0",
+        "beta": "2.4.1",
+        "latest": "2.6.1"
+      },
+      "remote_endpoint_in_readme": true,
+      "baseline_version": "2.3.3",
+      "baseline_published": "2026-06-15T11:52:35.970Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 38,
+        "tools_after": 1,
+        "added": [
+          "DispatchTimeout"
+        ],
+        "removed": [
+          "currents-cancel-run",
+          "currents-cancel-run-github-ci",
+          "currents-create-action",
+          "currents-create-jira-issue",
+          "currents-create-webhook",
+          "currents-delete-action",
+          "currents-delete-run",
+          "currents-delete-webhook",
+          "currents-disable-action",
+          "currents-enable-action",
+          "currents-find-run",
+          "currents-get-action",
+          "currents-get-affected-executions",
+          "currents-get-affected-test-executions",
+          "currents-get-context",
+          "currents-get-errors-explorer",
+          "currents-get-project",
+          "currents-get-project-insights",
+          "currents-get-projects",
+          "currents-get-run-details",
+          "currents-get-runs",
+          "currents-get-spec-files-performance",
+          "currents-get-spec-instance",
+          "currents-get-test-results",
+          "currents-get-tests-performance",
+          "currents-get-tests-signatures",
+          "currents-get-webhook",
+          "currents-link-jira-issue",
+          "currents-list-actions",
+          "currents-list-affected-tests",
+          "currents-list-jira-issue-types",
+          "currents-list-jira-projects",
+          "currents-list-project-terms",
+          "currents-list-pull-requests",
+          "currents-list-webhooks",
+          "currents-reset-run",
+          "currents-update-action",
+          "currents-update-webhook"
+        ],
+        "description_changed": [],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "2.3.3": "ec24ba6b0660001798f60fcf8fa7eccfe22a95ca880881606e768ddfd1b4b2ad",
+          "2.6.1": "dfc7cf4ba585678e9bd3dfa63459f05d9dec04566fce90a8cf60f5580af6aa74"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "DispatchTimeout"
+        ]
+      },
+      "churn_reliability": "unreliable",
+      "churn_reliability_note": "2.6.1 bundle changed shape; the one match 'DispatchTimeout' is not a tool"
+    },
+    {
+      "package": "@launchdarkly/mcp-server",
+      "npm_url": "https://www.npmjs.com/package/@launchdarkly/mcp-server",
+      "weekly_downloads": 46222,
+      "latest": "0.6.2",
+      "latest_published": "2026-05-08T21:08:17.934Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/launchdarkly/mcp-server.git",
+      "versions_last_window": 0,
+      "stable_versions_last_window": 0,
+      "readme_source": "README in @launchdarkly/mcp-server@0.6.2 tarball (as shown on npmjs.com)",
+      "readme_chars": 11489,
+      "install_lines": [
+        {
+          "line_no": 41,
+          "line": "\"-y\", \"--package\", \"@launchdarkly/mcp-server\", \"--\", \"mcp\", \"start\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 61,
+          "line": "\"-y\", \"--package\", \"@launchdarkly/mcp-server\", \"--\", \"mcp\", \"start\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 84,
+          "line": "\"-y\", \"--package\", \"@launchdarkly/mcp-server\", \"--\", \"mcp\", \"start\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 112,
+          "line": "\"-y\", \"--package\", \"@launchdarkly/mcp-server\", \"--\", \"mcp\", \"start\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 163,
+          "line": "\"-y\", \"--package\", \"@launchdarkly/mcp-server\", \"--\", \"mcp\", \"start\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 192,
+          "line": "\"-y\", \"--package\", \"@launchdarkly/mcp-server\", \"--\", \"mcp\", \"start\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 6,
+      "dist_tags": {
+        "latest": "0.6.2"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "0.6.2",
+      "baseline_published": "2026-05-08T21:08:17.934Z",
+      "churn": {
+        "status": "no_release_in_window",
+        "tools_now": 1
+      },
+      "churn_reliability": "n/a"
+    },
+    {
+      "package": "@salesforce/mcp",
+      "npm_url": "https://www.npmjs.com/package/@salesforce/mcp",
+      "weekly_downloads": 45508,
+      "latest": "0.30.15",
+      "latest_published": "2026-07-09T14:42:18.783Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/salesforcecli/mcp.git",
+      "versions_last_window": 1,
+      "stable_versions_last_window": 1,
+      "readme_source": "README in @salesforce/mcp@0.30.15 tarball (as shown on npmjs.com)",
+      "readme_chars": 34058,
+      "install_lines": [
+        {
+          "line_no": 38,
+          "line": "\"args\": [\"-y\", \"@salesforce/mcp\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 52,
+          "line": "- The `\"-y\", \"@salesforce/mcp\"` part tells `npx` to automatically install the `@salesforce/mcp` package instead of asking permission. Don't change this.",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 52,
+          "line": "- The `\"-y\", \"@salesforce/mcp\"` part tells `npx` to automatically install the `@salesforce/mcp` package instead of asking permission. Don't change this.",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 74,
+          "line": "\"args\": [\"-y\", \"@salesforce/mcp\",",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 93,
+          "line": "\"args\": [\"-y\", \"@salesforce/mcp@latest\",",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 112,
+          "line": "\"args\": [\"-y\", \"@salesforce/mcp@latest\",",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 2,
+      "bare_unversioned_lines": 4,
+      "dist_tags": {
+        "qa": "0.26.11-qa.0",
+        "dev": "0.26.11-dev.0",
+        "lastest": "0.30.4",
+        "latest": "0.30.15",
+        "rc": "0.30.15"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "0.30.14",
+      "baseline_published": "2026-06-23T22:05:15.119Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 36,
+        "tools_after": 36,
+        "added": [],
+        "removed": [],
+        "description_changed": [],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "0.30.14": "e7724500ed5f151592bbdeb09bea56f1999ae44abf42977b12b513c5b97d5c85",
+          "0.30.15": "7cd9f0a3437b5102d01d8d629fd1666487414c1256487fe60245a86b66e831b6"
+        },
+        "followed_dependencies": {
+          "before": {
+            "@salesforce/mcp-provider-api": {
+              "spec": "0.6.0",
+              "resolved": "0.6.0",
+              "sha256": "6b651c19a697fedf347d4d5dd999246d839460b37ef1e20b3ed555845b53f78a",
+              "tools": 0
+            },
+            "@salesforce/mcp-provider-devops": {
+              "spec": "0.3.8",
+              "resolved": "0.3.8",
+              "sha256": "3b81964f94803a461e9470c18787680494df09e47309aaec5ba531e03968c84e",
+              "tools": 12
+            },
+            "@salesforce/mcp-provider-dx-core": {
+              "spec": "0.9.8",
+              "resolved": "0.9.8",
+              "sha256": "424baad2cb5325496770aa118c5c768265e7b5f58e8fd732991540b85b4d37e5",
+              "tools": 13
+            },
+            "@salesforce/mcp-provider-mobile-web": {
+              "spec": "0.3.0",
+              "resolved": "0.3.0",
+              "sha256": "ce0978d1c8f7572730cf3e23a2b9a38f5f370ec9201751492561408a98ab7188",
+              "tools": 2
+            },
+            "@salesforce/mcp-provider-lwc-experts": {
+              "spec": "0.7.0",
+              "resolved": "0.7.0",
+              "sha256": "e7a7e5231c9cfadded1fbe53e2dba16a91ba23b6f505c92f75d91117ff32782d",
+              "tools": 4
+            },
+            "@salesforce/mcp-provider-aura-experts": {
+              "spec": "0.3.7",
+              "resolved": "0.3.7",
+              "sha256": "084f74f60e400f27ac6466b6fa0fd1909c0796c74f4a391f9220db1005c17e1a",
+              "tools": 1
+            },
+            "@salesforce/mcp-provider-code-analyzer": {
+              "spec": "0.8.1",
+              "resolved": "0.8.1",
+              "sha256": "55e211a91ba070ebd8e8400b9b73b190bdb0084c1f14b9d9ff78053a6b936c4c",
+              "tools": 0
+            },
+            "@salesforce/mcp-provider-scale-products": {
+              "spec": "0.0.6",
+              "resolved": "0.0.6",
+              "sha256": "c9a6ffe80c3175dba6ae69576044772f86d06f9dbaa2078a5ead10b6e645a393",
+              "tools": 1
+            },
+            "@salesforce/mcp-provider-metadata-enrichment": {
+              "spec": "0.1.8",
+              "resolved": "0.1.8",
+              "sha256": "7b5ca80f2f6d731949793ede69398f1567699b4811c8f4c8bf35932f4134beae",
+              "tools": 1
+            }
+          },
+          "after": {
+            "@salesforce/mcp-provider-api": {
+              "spec": "0.6.0",
+              "resolved": "0.6.0",
+              "sha256": "6b651c19a697fedf347d4d5dd999246d839460b37ef1e20b3ed555845b53f78a",
+              "tools": 0
+            },
+            "@salesforce/mcp-provider-devops": {
+              "spec": "0.3.8",
+              "resolved": "0.3.8",
+              "sha256": "3b81964f94803a461e9470c18787680494df09e47309aaec5ba531e03968c84e",
+              "tools": 12
+            },
+            "@salesforce/mcp-provider-dx-core": {
+              "spec": "0.9.8",
+              "resolved": "0.9.8",
+              "sha256": "424baad2cb5325496770aa118c5c768265e7b5f58e8fd732991540b85b4d37e5",
+              "tools": 13
+            },
+            "@salesforce/mcp-provider-mobile-web": {
+              "spec": "0.3.0",
+              "resolved": "0.3.0",
+              "sha256": "ce0978d1c8f7572730cf3e23a2b9a38f5f370ec9201751492561408a98ab7188",
+              "tools": 2
+            },
+            "@salesforce/mcp-provider-lwc-experts": {
+              "spec": "0.7.0",
+              "resolved": "0.7.0",
+              "sha256": "e7a7e5231c9cfadded1fbe53e2dba16a91ba23b6f505c92f75d91117ff32782d",
+              "tools": 4
+            },
+            "@salesforce/mcp-provider-aura-experts": {
+              "spec": "0.3.7",
+              "resolved": "0.3.7",
+              "sha256": "084f74f60e400f27ac6466b6fa0fd1909c0796c74f4a391f9220db1005c17e1a",
+              "tools": 1
+            },
+            "@salesforce/mcp-provider-code-analyzer": {
+              "spec": "0.8.1",
+              "resolved": "0.8.1",
+              "sha256": "55e211a91ba070ebd8e8400b9b73b190bdb0084c1f14b9d9ff78053a6b936c4c",
+              "tools": 0
+            },
+            "@salesforce/mcp-provider-scale-products": {
+              "spec": "0.0.6",
+              "resolved": "0.0.6",
+              "sha256": "c9a6ffe80c3175dba6ae69576044772f86d06f9dbaa2078a5ead10b6e645a393",
+              "tools": 1
+            },
+            "@salesforce/mcp-provider-metadata-enrichment": {
+              "spec": "0.1.8",
+              "resolved": "0.1.8",
+              "sha256": "7b5ca80f2f6d731949793ede69398f1567699b4811c8f4c8bf35932f4134beae",
+              "tools": 1
+            }
+          }
+        },
+        "tool_names_after": [
+          "assign_permission_set",
+          "check_devops_center_commit_status",
+          "checkout_devops_center_work_item",
+          "commit_devops_center_work_item",
+          "create_devops_center_pull_request",
+          "create_devops_center_work_item",
+          "create_org_snapshot",
+          "create_scratch_org",
+          "delete_org",
+          "deploy_metadata",
+          "detect_devops_center_merge_conflict",
+          "enable_tools",
+          "enrich_metadata",
+          "get_mobile_lwc_offline_analysis",
+          "get_mobile_lwc_offline_guidance",
+          "get_username",
+          "guide_lwc_rtl_support",
+          "list_all_orgs",
+          "list_devops_center_projects",
+          "list_devops_center_work_items",
+          "list_tools",
+          "open_org",
+          "orchestrate_aura_migration",
+          "orchestrate_lwc_slds2_uplift",
+          "promote_devops_center_work_item",
+          "resolve_devops_center_deployment_failure",
+          "resolve_devops_center_merge_conflict",
+          "resume_tool_operation",
+          "retrieve_metadata",
+          "run_agent_test",
+          "run_apex_test",
+          "run_soql_query",
+          "scan_apex_class_for_antipatterns",
+          "score_issues",
+          "update_devops_center_work_item_status",
+          "validate_and_optimize"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@netlify/mcp",
+      "npm_url": "https://www.npmjs.com/package/@netlify/mcp",
+      "weekly_downloads": 42170,
+      "latest": "1.16.0",
+      "latest_published": "2026-09-25T17:33:44.704Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/netlify/netlify-mcp.git",
+      "versions_last_window": 1,
+      "stable_versions_last_window": 1,
+      "readme_source": "README in @netlify/mcp@1.16.0 tarball (as shown on npmjs.com)",
+      "readme_chars": 4652,
+      "install_lines": [
+        {
+          "line_no": 75,
+          "line": "\"@netlify/mcp\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 107,
+          "line": "\"args\": [\"-y\", \"@netlify/mcp\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 2,
+      "dist_tags": {
+        "latest": "1.16.0"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "1.15.1",
+      "baseline_published": "2025-11-11T15:38:23.610Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 1,
+        "tools_after": 1,
+        "added": [],
+        "removed": [],
+        "description_changed": [],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "1.15.1": "2f230215d89b9676cde0a831b7da278982cc51e923cdd7a73b35c48b093071e3",
+          "1.16.0": "2546bd7bb1792106013ff0fe40ad65163f7842a0a4356cd3efe31eb91e068be4"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "netlify-coding-rules"
+        ]
+      },
+      "churn_reliability": "unreliable",
+      "churn_reliability_note": "the one match 'netlify-coding-rules' is not the tool list"
+    },
+    {
+      "package": "@mastra/mcp-docs-server",
+      "npm_url": "https://www.npmjs.com/package/@mastra/mcp-docs-server",
+      "weekly_downloads": 38391,
+      "latest": "1.3.1",
+      "latest_published": "2026-09-24T23:32:18.668Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/mastra-ai/mastra.git",
+      "versions_last_window": 283,
+      "stable_versions_last_window": 28,
+      "readme_source": "README in @mastra/mcp-docs-server@1.3.1 tarball (as shown on npmjs.com)",
+      "readme_chars": 888,
+      "install_lines": [
+        {
+          "line_no": 16,
+          "line": "npx @mastra/mcp-docs-server",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 1,
+      "dist_tags": {
+        "mastra-2973-fast-mcp-removal": "0.0.0-mastra-2973-fast-mcp-removal-20250409163028",
+        "fix-memory-xxhash": "0.0.0-fix-memory-xxhash-20250409202110",
+        "default-storage-virtual-file": "0.0.0-default-storage-virtual-file-20250410035748",
+        "commonjs": "0.0.0-commonjs-20250414101718",
+        "afterToolExecute": "0.0.0-afterToolExecute-20250415041527",
+        "message-ordering": "0.0.0-message-ordering-20250415215612",
+        "remove-tiktoken": "0.0.0-remove-tiktoken-20250415231938",
+        "llamaindex-extract": "0.0.0-llamaindex-extract-20250416163822",
+        "revert-schema": "0.0.0-revert-schema-20250416221206",
+        "mastra-3123-mcp-server": "0.0.0-mastra-3123-mcp-server-20250419180157",
+        "mcp-server-update": "0.0.0-mcp-server-update-20250421162713",
+        "mcp-server-update-parse": "0.0.0-mcp-server-update-parse-20250421171139",
+        "a2a": "0.0.0-a2a-20250421213654",
+        "vnextWorkflows": "0.0.0-vnextWorkflows-20250422142014",
+        "mastra-3171-llamaindex-pin": "0.0.0-mastra-3171-llamaindex-pin-20250423175211",
+        "bundle-dynamic-imports": "0.0.0-bundle-dynamic-imports-20250424001248",
+        "llamaindex-switch-core": "0.0.0-llamaindex-switch-core-20250424001624",
+        "switch-to-core": "0.0.0-switch-to-core-20250424015131",
+        "remove-cloud-span-transform": "0.0.0-remove-cloud-span-transform-20250425214156",
+        "pg-pool-options": "0.0.0-pg-pool-options-20250428183821",
+        "mcp-schema-serializer": "0.0.0-mcp-schema-serializer-20250430202337",
+        "separate-trace-data-from-component": "0.0.0-separate-trace-data-from-component-20250501141108",
+        "agui": "0.0.0-agui-20250501191909",
+        "expose-more-playground-ui": "0.0.0-expose-more-playground-ui-20250502141824",
+        "fix-message-embedding": "0.0.0-fix-message-embedding-20250506021742",
+        "trigger-playground-ui-package": "0.0.0-trigger-playground-ui-package-20250506151043",
+        "mcp-server-deploy": "0.0.0-mcp-server-deploy-20250507160341",
+        "mastra-3338-mastra-memory-pinecone": "0.0.0-mastra-3338-mastra-memory-pinecone-20250507174328",
+        "mastra-2452-core-tracing-sentry": "0.0.0-mastra-2452-core-tracing-sentry-20250507205331",
+        "vnext-inngest": "0.0.0-vnext-inngest-20250508131921",
+        "redis-cloud-transporter": "0.0.0-redis-cloud-transporter-20250508203756",
+        "generate-message-id": "0.0.0-generate-message-id-20250512171942",
+        "cloud-transporter": "0.0.0-cloud-transporter-20250513033346",
+        "vector-query-sources": "0.0.0-vector-query-sources-20250516172905",
+        "vector-sources": "0.0.0-vector-sources-20250516175436",
+        "add-runtime-context-to-openai-realtime": "0.0.0-add-runtime-context-to-openai-realtime-20250516201052",
+        "course": "0.0.0-course-20250527170450",
+        "inject-middleware": "0.0.0-inject-middleware-20250528222017",
+        "pass-headers-for-create-mastra-client": "0.0.0-pass-headers-for-create-mastra-client-20250530010057",
+        "vnextAgentNetwork": "0.0.0-vnextAgentNetwork-20250602134426",
+        "taofeeqInngest": "0.0.0-taofeeqInngest-20250603090617",
+        "workflow-deno": "0.0.0-workflow-deno-20250616132510",
+        "fix-generate-title": "0.0.0-fix-generate-title-20250616171351",
+        "working-memory-per-user": "0.0.0-working-memory-per-user-20250620163010",
+        "fix-fetch-workflow-runs": "0.0.0-fix-fetch-workflow-runs-20250624231457",
+        "fix-fetching-workflow-snapshots": "0.0.0-fix-fetching-workflow-snapshots-20250625000954",
+        "tool-call-parts": "0.0.0-tool-call-parts-20250630193309",
+        "support-d1-client": "0.0.0-support-d1-client-20250701191943",
+        "http-transporter": "0.0.0-http-transporter-20250702160118",
+        "tsconfig-compile": "0.0.0-tsconfig-compile-20250703214351",
+        "mcp-changeset": "0.0.0-mcp-changeset-20250707162621",
+        "custom-instrumentation": "0.0.0-custom-instrumentation-20250708222033",
+        "cloudflare-deployer-dont-install-deps": "0.0.0-cloudflare-deployer-dont-install-deps-20250714111754",
+        "message-list-update": "0.0.0-message-list-update-20250715150321",
+        "fix-traces-pagination-plus-share-for-cloud": "0.0.0-fix-traces-pagination-plus-share-for-cloud-20250717084908",
+        "fix-shareable-traces": "0.0.0-fix-shareable-traces-20250717112558",
+        "fix-message-list-merge": "0.0.0-fix-message-list-merge-20250718043058",
+        "share-agent-metadata-with-cloud": "0.0.0-share-agent-metadata-with-cloud-20250718123411",
+        "declaration-maps": "0.0.0-declaration-maps-20250730185206",
+        "transpile-packages": "0.0.0-transpile-packages-20250731152758",
+        "fix-tool-call-history": "0.0.0-fix-tool-call-history-20250731222019",
+        "feat-tool-input-validation": "0.0.0-feat-tool-input-validation-20250731232758",
+        "new-scorer-api": "0.0.0-new-scorer-api-20250801075530",
+        "update-scorers-api": "0.0.0-update-scorers-api-20250801170445",
+        "scorers-api-v2": "0.0.0-scorers-api-v2-20250801171841",
+        "mssql-store": "0.0.0-mssql-store-20250804200341",
+        "fix-tool-call-history-3": "0.0.0-fix-tool-call-history-3-20250806004225",
+        "taofeeq-fix-tool-call-showing-after-message": "0.0.0-taofeeq-fix-tool-call-showing-after-message-20250806184630",
+        "fix-message-list-args-missing": "0.0.0-fix-message-list-args-missing-20250807205055",
+        "feat-support-ai-sdk-5-again": "0.0.0-feat-support-ai-sdk-5-again-20250813225910",
+        "memory-system-message-error": "0.0.0-memory-system-message-error-20250813233316",
+        "ai-v5": "0.0.0-ai-v5-20250813235735",
+        "experimental-agent-builder": "0.0.0-experimental-agent-builder-20250815195917",
+        "zod-v4-compat-part-2": "0.0.0-zod-v4-compat-part-2-20250822105954",
+        "zod-v4-stuff": "0.0.0-zod-v4-stuff-20250825154219",
+        "vector-query-tool-provider-options": "0.0.0-vector-query-tool-provider-options-20250828222356",
+        "consolidate-changesets": "0.0.0-consolidate-changesets-20250904042643",
+        "message-file-url-handling-fix": "0.0.0-message-file-url-handling-fix-20250904234524",
+        "pgvector-index-fix": "0.0.0-pgvector-index-fix-20250905222058",
+        "issue-7498": "0.0.0-issue-7498-20250905233741",
+        "ai-telementry-ui": "0.0.0-ai-telementry-ui-20250908102126",
+        "stream-vnext-usage": "0.0.0-stream-vnext-usage-20250908171242",
+        "remove-unused-import": "0.0.0-remove-unused-import-20250909212718",
+        "issue-7087": "0.0.0-issue-7087-20250910004053",
+        "tool-list-type": "0.0.0-tool-list-type-20250910154522",
+        "add-libsql-changeset": "0.0.0-add-libsql-changeset-20250910154739",
+        "interpolate-reporter-url": "0.0.0-interpolate-reporter-url-20250910180021",
+        "fix-zod-to-json-schema-ref-strategy": "0.0.0-fix-zod-to-json-schema-ref-strategy-20250910193441",
+        "add-save-score-validation-on-stores": "0.0.0-add-save-score-validation-on-stores-20250911031242",
+        "fix-bundle-cleanup": "0.0.0-fix-bundle-cleanup-20250911062914",
+        "iterate-traces-ui-again": "0.0.0-iterate-traces-ui-again-20250912091900",
+        "scorers-ui-refactored": "0.0.0-scorers-ui-refactored-20250916094952",
+        "gl-test": "0.0.0-gl-test-20250917080133",
+        "toolOptionTypes": "0.0.0-toolOptionTypes-20250917085558",
+        "configure-project-root-for-private-packages": "0.0.0-configure-project-root-for-private-packages-20250919100548",
+        "vector-extension-schema": "0.0.0-vector-extension-schema-20250922130418",
+        "fix-cloud-peer-deps": "0.0.0-fix-cloud-peer-deps-20250923194656",
+        "scorer-agentnames-conditional": "0.0.0-scorer-agentnames-conditional-20250926065249",
+        "createToolOptions": "0.0.0-createToolOptions-20250926094418",
+        "roamin-openaivoice-speak-options-passing": "0.0.0-roamin-openaivoice-speak-options-passing-20250926163614",
+        "rag-chunk-extract-llm-option": "0.0.0-rag-chunk-extract-llm-option-20250926183645",
+        "fix-cloud-peer-deps-20250929": "0.0.0-fix-cloud-peer-deps-20250929-20250929175756",
+        "fix-cloud-peer-deps-libsql": "0.0.0-fix-cloud-peer-deps-libsql-20250929202200",
+        "fix-cloud-peer-deps-loggers": "0.0.0-fix-cloud-peer-deps-loggers-20250929204101",
+        "suspendRuntimeContextTypeFix": "0.0.0-suspendRuntimeContextTypeFix-20250930142630",
+        "fix-network-silence": "0.0.0-fix-network-silence-20250930164151",
+        "cloud-deployer-for-core-0.19.1": "0.0.0-cloud-deployer-for-core-0.19.1-20251001164939",
+        "break-rename-vnext-legacy": "0.0.0-break-rename-vnext-legacy-20251002212351",
+        "cor235": "0.0.0-cor235-20251008190353",
+        "cor235-2": "0.0.0-cor235-2-20251008193754",
+        "fix-maxSteps-modelsetting-playground": "0.0.0-fix-maxSteps-modelsetting-playground-20251008194458",
+        "fix-runtimeContext-passing-chatRoute": "0.0.0-fix-runtimeContext-passing-chatRoute-20251008220150",
+        "fix-read-json-esm": "0.0.0-fix-read-json-esm-20251009172143",
+        "chore-core-swap-aiv5-ai-package-naming": "0.0.0-chore-core-swap-aiv5-ai-package-naming-20251009203931",
+        "unified-sidebar": "0.0.0-unified-sidebar-20251010130811",
+        "ai-sdk-workflow-route": "0.0.0-ai-sdk-workflow-route-20251010135341",
+        "dynamic-model-router": "0.0.0-dynamic-model-router-20251010230835",
+        "monorepo-binary": "0.0.0-monorepo-binary-20251013210052",
+        "just-snapshot": "0.0.0-just-snapshot-20251014192224",
+        "fix-core-reasoning-parts": "0.0.0-fix-core-reasoning-parts-20251015155834",
+        "usechat-duplicate": "0.0.0-usechat-duplicate-20251016110554",
+        "ai-sdk-network-text-delta": "0.0.0-ai-sdk-network-text-delta-20251017172601",
+        "model-router-unknown-provider": "0.0.0-model-router-unknown-provider-20251017212006",
+        "error-handler-fix": "0.0.0-error-handler-fix-20251020202607",
+        "fix-model-router-machine-cache": "0.0.0-fix-model-router-machine-cache-20251021232825",
+        "fix-writer-workflow-resumestream": "0.0.0-fix-writer-workflow-resumestream-20251022161252",
+        "agent-error-handling": "0.0.0-agent-error-handling-20251023180025",
+        "extract-tool-ui-inp-playground-ui": "0.0.0-extract-tool-ui-inp-playground-ui-20251024041825",
+        "fix-memory-search-fetch": "0.0.0-fix-memory-search-fetch-20251027160505",
+        "fix-multi-modal-for-cloud": "0.0.0-fix-multi-modal-for-cloud-20251028082043",
+        "add-crumb-action": "0.0.0-add-crumb-action-20251028111500",
+        "sidebar-window-undefined-fix": "0.0.0-sidebar-window-undefined-fix-20251029233656",
+        "bundle-recursion": "0.0.0-bundle-recursion-20251030002519",
+        "remove-unused-model-providers-api": "0.0.0-remove-unused-model-providers-api-20251030210744",
+        "playground-studio-cloud": "0.0.0-playground-studio-cloud-20251031080052",
+        "fix-persist-session-cache-option-mcp-server": "0.0.0-fix-persist-session-cache-option-mcp-server-20251031182703",
+        "fix-9244-clickhouse-metadata": "0.0.0-fix-9244-clickhouse-metadata-20251105010900",
+        "main-test": "0.0.0-main-test-20251105183450",
+        "fix-thread-list": "0.0.0-fix-thread-list-20251105222841",
+        "allow-to-pass-a-mastra-url-instance": "0.0.0-allow-to-pass-a-mastra-url-instance-20251105224938",
+        "main-test-05-11-2025-2": "0.0.0-main-test-05-11-2025-2-20251106053353",
+        "1.x-tester": "0.0.0-1.x-tester-20251106141102",
+        "cloud-storage-adapter": "0.0.0-cloud-storage-adapter-20251106204059",
+        "add-stepgraph-to-run-exec-result": "0.0.0-add-stepgraph-to-run-exec-result-20251112113541",
+        "refactor-agent-information-for-recomposable-ui": "0.0.0-refactor-agent-information-for-recomposable-ui-20251112151814",
+        "export-agent-memory-from-local-studio": "0.0.0-export-agent-memory-from-local-studio-20251112153946",
+        "playground-studio-again": "0.0.0-playground-studio-again-20251114102707",
+        "client-js-listmessages-agentid-fix": "0.0.0-client-js-listmessages-agentid-fix-20251119175531",
+        "trace-timeline-update": "0.0.0-trace-timeline-update-20251121114225",
+        "fix-ai-sdk-dependency": "0.0.0-fix-ai-sdk-dependency-20251124104209",
+        "span-scorring-test": "0.0.0-span-scorring-test-20251124132129",
+        "fix-issue-10434-concurrent-write-corruption": "0.0.0-fix-issue-10434-concurrent-write-corruption-20251124213939",
+        "netlify-no-bundle": "0.0.0-netlify-no-bundle-20251127120354",
+        "main-test-2": "0.0.0-main-test-2-20251127211532",
+        "fix-backport-setserver": "0.0.0-fix-backport-setserver-20251201151948",
+        "partial-response-backport": "0.0.0-partial-response-backport-20251204204441",
+        "safe-stringify-telemetry": "0.0.0-safe-stringify-telemetry-20251205024938",
+        "feat-improve-processors": "0.0.0-feat-improve-processors-20251205191721",
+        "scorers-logs": "0.0.0-scorers-logs-20251208123838",
+        "fix-request-context-as-query-key": "0.0.0-fix-request-context-as-query-key-20251209130646",
+        "feat-add-query-option-to-playground": "0.0.0-feat-add-query-option-to-playground-20251209160219",
+        "fix-prompt-enhance-route": "0.0.0-fix-prompt-enhance-route-20251210210827",
+        "top-level-fix": "0.0.0-top-level-fix-20251211111608",
+        "fix-zod4-schema-validation": "0.0.0-fix-zod4-schema-validation-20251212180638",
+        "cloud-604-map-nested-flow-details-to-side-panel": "0.0.0-cloud-604-map-nested-flow-details-to-side-panel-20251212192149",
+        "new-button-export": "0.0.0-new-button-export-20251219133013",
+        "elated-armadillo-be37a1": "0.0.0-elated-armadillo-be37a1-20251219210627",
+        "elated-armadillo-be37a1-2": "0.0.0-elated-armadillo-be37a1-2-20251219213629",
+        "bundle-studio-cloud": "0.0.0-bundle-studio-cloud-20251222034739",
+        "fix-11329-windows-path": "0.0.0-fix-11329-windows-path-20251222155941",
+        "fix-local-pkg-cwd": "0.0.0-fix-local-pkg-cwd-20251226155239",
+        "feat-8782-cf-bindings": "0.0.0-feat-8782-cf-bindings-20260102164434",
+        "jail-fs": "0.0.0-jail-fs-20260105160110",
+        "remove-ai-peer-dep-from-evals": "0.0.0-remove-ai-peer-dep-from-evals-20260105220639",
+        "fix-11640-persist-workflow-events-to-memory": "0.0.0-fix-11640-persist-workflow-events-to-memory-20260106220027",
+        "feat-mcp-embedded-docs-tools-clean": "0.0.0-feat-mcp-embedded-docs-tools-clean-20260108143611",
+        "mastra-auto-detect-server": "0.0.0-mastra-auto-detect-server-20260108233416",
+        "testing-cloud-studios": "0.0.0-testing-cloud-studios-20260114234039",
+        "alternative-angelfish-f7665c": "0.0.0-alternative-angelfish-f7665c-20260119184917",
+        "fix-agent-network-schema-test-2": "0.0.0-fix-agent-network-schema-test-2-20260119190919",
+        "fix-agent-network-coderabbit": "0.0.0-fix-agent-network-coderabbit-20260119210110",
+        "fix-agent-network-schema": "0.0.0-fix-agent-network-schema-20260119213029",
+        "type-testing": "0.0.0-type-testing-20260120105120",
+        "ci-trigger-cloud-tests-on-stable-release": "0.0.0-ci-trigger-cloud-tests-on-stable-release-20260120235652",
+        "bundle-version": "0.0.0-bundle-version-20260121132824",
+        "salesman": "0.0.0-salesman-20260127182805",
+        "unified-workspace-snapshot": "0.0.0-unified-workspace-snapshot-20260128233410",
+        "beta": "1.0.2-alpha.2",
+        "fix-12500-lance-search": "0.0.0-fix-12500-lance-search-20260130204823",
+        "cloudflare-file-url-lazy": "0.0.0-cloudflare-file-url-lazy-20260130204903",
+        "feat-cli-skills-installation": "0.0.0-feat-cli-skills-installation-20260202141803",
+        "om-core": "0.0.0-om-core-20260203041801",
+        "auth-and-authz": "0.0.0-auth-and-authz-20260203062537",
+        "om-ui": "0.0.0-om-ui-20260203185649",
+        "om": "0.0.0-om-20260204032032",
+        "oma": "0.0.0-oma-20260208093055",
+        "om-pg-fix": "0.0.0-om-pg-fix-20260211231820",
+        "fix-improve-processor-error-messages": "0.0.0-fix-improve-processor-error-messages-20260212003648",
+        "om-pg-fix-2": "0.0.0-om-pg-fix-2-20260212005300",
+        "feat-change-lifecycle": "0.0.0-feat-change-lifecycle-20260212014650",
+        "working-memory-undefined": "0.0.0-working-memory-undefined-20260212204651",
+        "parallel-workflow": "0.0.0-parallel-workflow-20260212235652",
+        "auth-rbac-cms": "0.0.0-auth-rbac-cms-20260213083418",
+        "test-oc-plugin": "0.0.0-test-oc-plugin-20260214000218",
+        "local-fs-allowedpaths": "0.0.0-local-fs-allowedpaths-20260214000244",
+        "om-tracking": "0.0.0-om-tracking-20260214064228",
+        "to-model-output": "0.0.0-to-model-output-20260217220843",
+        "provider-metadata-cache": "0.0.0-provider-metadata-cache-20260218172243",
+        "workflow-timeout-issue": "0.0.0-workflow-timeout-issue-20260220185702",
+        "om-oom": "0.0.0-om-oom-20260223222312",
+        "sandbox-process-manager": "0.0.0-sandbox-process-manager-20260223224846",
+        "om-locking": "0.0.0-om-locking-20260223230740",
+        "core-setters": "0.0.0-core-setters-20260226001619",
+        "openai-reasoning": "0.0.0-openai-reasoning-20260226184314",
+        "codex-om": "0.0.0-codex-om-20260226233706",
+        "key-fix": "0.0.0-key-fix-20260227010020",
+        "open-ai-websocket-in-responses": "0.0.0-open-ai-websocket-in-responses-20260227094419",
+        "vercel-studio": "0.0.0-vercel-studio-20260227110350",
+        "mcp-tool-output": "0.0.0-mcp-tool-output-20260227175751",
+        "fix-cloudflare-rest-api": "0.0.0-fix-cloudflare-rest-api-20260227192337",
+        "harness-token-count": "0.0.0-harness-token-count-20260228173428",
+        "mc-workspace-lsp": "0.0.0-mc-workspace-lsp-20260302174254",
+        "structured-output-issue": "0.0.0-structured-output-issue-20260302184919",
+        "standalone-studio-base-path": "0.0.0-standalone-studio-base-path-20260302212555",
+        "auth-combined-test-all": "0.0.0-auth-combined-test-all-20260303004752",
+        "execa-dynamic-import": "0.0.0-execa-dynamic-import-20260304221256",
+        "dataset-demo": "0.0.0-dataset-demo-20260305035339",
+        "om-gateway-api": "0.0.0-om-gateway-api-20260305133211",
+        "agent-chat-ui": "0.0.0-agent-chat-ui-20260305212602",
+        "fix-windows-shell": "0.0.0-fix-windows-shell-20260306014721",
+        "standard-schema2": "0.0.0-standard-schema2-20260306110923",
+        "fix-crp-combined": "0.0.0-fix-crp-combined-20260306234242",
+        "standard-schema": "0.0.0-standard-schema-20260309155201",
+        "fix-get-public-origin": "0.0.0-fix-get-public-origin-20260309162301",
+        "om-tokenx": "0.0.0-om-tokenx-20260311200257",
+        "ten-fragrance": "0.0.0-ten-fragrance-20260317150728",
+        "obs-server": "0.0.0-obs-server-20260317161348",
+        "mastra-ai-sdk-v6": "0.0.0-mastra-ai-sdk-v6-20260318060129",
+        "tracing-hotfix": "0.0.0-tracing-hotfix-20260319165043",
+        "server-deploy": "0.0.0-server-deploy-20260320203954",
+        "standalone-om": "0.0.0-standalone-om-20260323052404",
+        "refactor-om": "0.0.0-refactor-om-20260324202715",
+        "satisfying-prince": "0.0.0-satisfying-prince-20260325135444",
+        "diligent-sun": "0.0.0-diligent-sun-20260326101831",
+        "impossible-find": "0.0.0-impossible-find-20260326145947",
+        "register-exporter-remote-read-obs": "0.0.0-register-exporter-remote-read-obs-20260326165517",
+        "test-gw": "0.0.0-test-gw-20260326233404",
+        "apricot-manager": "0.0.0-apricot-manager-20260327095430",
+        "satin-jumpsuit": "0.0.0-satin-jumpsuit-20260327151201",
+        "circular-json-tool-results": "0.0.0-circular-json-tool-results-20260330235654",
+        "everlasting-joggers": "0.0.0-everlasting-joggers-20260331153923",
+        "standalone-om-load-unobserved-messages": "0.0.0-standalone-om-load-unobserved-messages-20260401102045",
+        "nettle-television": "0.0.0-nettle-television-20260403073140",
+        "checker-apparel": "0.0.0-checker-apparel-20260403114233",
+        "om-race-fix": "0.0.0-om-race-fix-20260403160819",
+        "equatorial-gazelle": "0.0.0-equatorial-gazelle-20260403171544",
+        "studio-deploy": "0.0.0-studio-deploy-20260404184540",
+        "mysterious-auroraceratops": "0.0.0-mysterious-auroraceratops-20260404195627",
+        "om-token-usage": "0.0.0-om-token-usage-20260405051405",
+        "async-hooks-fix": "0.0.0-async-hooks-fix-20260405155845",
+        "routes-manifest": "0.0.0-routes-manifest-20260407220745",
+        "fix-openai-reasoning-summaries": "0.0.0-fix-openai-reasoning-summaries-20260409175618",
+        "structured-output-errors": "0.0.0-structured-output-errors-20260409185629",
+        "structured-output-custom-gateway": "0.0.0-structured-output-custom-gateway-20260409211226",
+        "data-structured-output": "0.0.0-data-structured-output-20260409231045",
+        "fix-deploy-cmd": "0.0.0-fix-deploy-cmd-20260410180830",
+        "datadog-bridge-alpha-1": "0.0.0-datadog-bridge-alpha-1-20260413203917",
+        "structured-output-agent": "0.0.0-structured-output-agent-20260413221909",
+        "datadog-bridge-alpha-2": "0.0.0-datadog-bridge-alpha-2-20260414145159",
+        "tool-strict-mode": "0.0.0-tool-strict-mode-20260414145952",
+        "strict-tools-indeed-2": "0.0.0-strict-tools-indeed-2-20260415164635",
+        "structured-output-agent-2": "0.0.0-structured-output-agent-2-20260415234442",
+        "graysonhicks-oom-stream-debug": "0.0.0-graysonhicks-oom-stream-debug-20260416124609",
+        "refactor-playground-ui-ds-polish": "0.0.0-refactor-playground-ui-ds-polish-20260416135902",
+        "graysonhicks-tool-strict-passthrough": "0.0.0-graysonhicks-tool-strict-passthrough-20260416194824",
+        "graysonhicks-langfuse-oom-fix": "0.0.0-graysonhicks-langfuse-oom-fix-20260416200726",
+        "structured-output-agent-3": "0.0.0-structured-output-agent-3-20260416235704",
+        "snapshot-docker-sandbox": "0.0.0-snapshot-docker-sandbox-20260417075053",
+        "use-agent-structured-output-3": "0.0.0-use-agent-structured-output-3-20260420191925",
+        "use-agent-structured-output-4": "0.0.0-use-agent-structured-output-4-20260420203516",
+        "use-agent-structured-output-5": "0.0.0-use-agent-structured-output-5-20260420235457",
+        "fix-observability-traces-loading-heavy": "0.0.0-fix-observability-traces-loading-heavy-20260421094911",
+        "clickhouse-init-failure": "0.0.0-clickhouse-init-failure-20260421173907",
+        "playground-ui-domains-logs": "0.0.0-playground-ui-domains-logs-20260423114902",
+        "datadog-bridge-alpha-3": "0.0.0-datadog-bridge-alpha-3-20260424112321",
+        "a2a-vnext": "0.0.0-a2a-vnext-20260424123427",
+        "logs-to-playground-ui": "0.0.0-logs-to-playground-ui-20260424140321",
+        "toolcall-hooks-channels": "0.0.0-toolcall-hooks-channels-20260424195815",
+        "temporal": "0.0.0-temporal-20260427105254",
+        "transparent-server-side-refresh": "0.0.0-transparent-server-side-refresh-20260427210959",
+        "bristle-rule": "0.0.0-bristle-rule-20260428071048",
+        "feat-fga": "0.0.0-feat-fga-20260429175809",
+        "tsgo": "0.0.0-tsgo-20260430191301",
+        "studio-cli": "0.0.0-studio-cli-20260504022012",
+        "explore-new-metrics-update": "0.0.0-explore-new-metrics-update-20260507090602",
+        "fix-buildmessagesfromchunks-message-part-ordering": "0.0.0-fix-buildmessagesfromchunks-message-part-ordering-20260507134311",
+        "feat-a2a-agent-class": "0.0.0-feat-a2a-agent-class-20260511141748",
+        "observe": "0.0.0-observe-20260511170229",
+        "observability-branches": "0.0.0-observability-branches-20260512165357",
+        "branches-as-default": "0.0.0-branches-as-default-20260512170712",
+        "wardpeet-acp": "0.0.0-wardpeet-acp-20260513090758",
+        "switch-to-traces-mode-as-default": "0.0.0-switch-to-traces-mode-as-default-20260514090630",
+        "builder-demo": "0.0.0-builder-demo-20260515002221",
+        "traces-subtraces": "0.0.0-traces-subtraces-20260515133158",
+        "ag-example": "0.0.0-ag-example-20260516005230",
+        "level-icon-moved": "0.0.0-level-icon-moved-20260518094006",
+        "feat-ds-slider-base-ui": "0.0.0-feat-ds-slider-base-ui-20260519180421",
+        "auto-provider-attachment": "0.0.0-auto-provider-attachment-20260522010929",
+        "vnext": "0.0.0-vnext-20260522131221",
+        "posthog-env-respect": "0.0.0-posthog-env-respect-20260526194440",
+        "a-b-demo": "0.0.0-a-b-demo-20260526202724",
+        "fix-playground-ui-context-menu-z-index": "0.0.0-fix-playground-ui-context-menu-z-index-20260527122415",
+        "workflow-graph-crash": "0.0.0-workflow-graph-crash-20260527191009",
+        "fix-workflow-graph-part-2": "0.0.0-fix-workflow-graph-part-2-20260527233847",
+        "graph-crash-v3": "0.0.0-graph-crash-v3-20260528202217",
+        "feat-playground-ui-input-button-groups": "0.0.0-feat-playground-ui-input-button-groups-20260529070627",
+        "fix-create-observability-org-selection": "0.0.0-fix-create-observability-org-selection-20260529112852",
+        "deploy-alex-2": "0.0.0-deploy-alex-2-20260602122535",
+        "declined-tool-result-fix": "0.0.0-declined-tool-result-fix-20260602220958",
+        "wardpeet-auth-rework": "0.0.0-wardpeet-auth-rework-20260604074715",
+        "yj-ab-demo": "0.0.0-yj-ab-demo-20260604080218",
+        "channels-owner-stream": "0.0.0-channels-owner-stream-20260605033931",
+        "signals-pubsub-reserve": "0.0.0-signals-pubsub-reserve-20260605182857",
+        "channels-output-processor": "0.0.0-channels-output-processor-20260605211340",
+        "channels-on-lease": "0.0.0-channels-on-lease-20260612211814",
+        "feat-dataset-tenancy": "0.0.0-feat-dataset-tenancy-20260622154040",
+        "caleb-channels-on-lease": "0.0.0-caleb-channels-on-lease-20260623021557",
+        "livekit-alpha-v1": "0.0.0-livekit-alpha-v1-20260624034109",
+        "livekit-alpha-v2": "0.0.0-livekit-alpha-v2-20260626063843",
+        "livekit-alpha-v3": "0.0.0-livekit-alpha-v3-20260629032431",
+        "unified-deploy": "0.0.0-unified-deploy-20260630185855",
+        "fix-decline-tool-call": "0.0.0-fix-decline-tool-call-20260630190928",
+        "agent-learning-fetch-again": "0.0.0-agent-learning-fetch-again-20260701195212",
+        "yj-multitenant-scores": "0.0.0-yj-multitenant-scores-20260701201442",
+        "livekit-alpha-3.5": "0.0.0-livekit-alpha-3.5-20260702153513",
+        "fix-signals-client-api-learning-contract": "0.0.0-fix-signals-client-api-learning-contract-20260702194528",
+        "mastracode-cloud": "0.0.0-mastracode-cloud-20260706153555",
+        "livekit-beta-v1": "0.0.0-livekit-beta-v1-20260707053345",
+        "livekit-beta-v2": "0.0.0-livekit-beta-v2-20260708044444",
+        "livekit-beta-v3": "0.0.0-livekit-beta-v3-20260709031728",
+        "fix-workflow-step-timing-and-parallel-status": "0.0.0-fix-workflow-step-timing-and-parallel-status-20260715180716",
+        "goal-mode-ci": "0.0.0-goal-mode-ci-20260716044112",
+        "fix-persisted-approval-run-id": "0.0.0-fix-persisted-approval-run-id-20260720142927",
+        "monorepo-flexibility": "0.0.0-monorepo-flexibility-20260722142608",
+        "fix-thread-subscription-multi-instance-redis-streams": "0.0.0-fix-thread-subscription-multi-instance-redis-streams-20260730204150",
+        "feat-move-slack-integration-to-factory": "0.0.0-feat-move-slack-integration-to-factory-20260804181842",
+        "sandbox-private-exec": "0.0.0-sandbox-private-exec-20260804211430",
+        "esbuild-bundle-worker": "0.0.0-esbuild-bundle-worker-20260807182016",
+        "platform-sandbox-sidecar-probe": "0.0.0-platform-sandbox-sidecar-probe-20260809163846",
+        "openai-schema-compat-issue": "0.0.0-openai-schema-compat-issue-20260810211758",
+        "factory-sessions-first-meaningful-exec-at": "0.0.0-factory-sessions-first-meaningful-exec-at-20260810230411",
+        "platform-turn-end-wiring": "0.0.0-platform-turn-end-wiring-20260811044905",
+        "perf-factory-sandbox-lifecycle": "0.0.0-perf-factory-sandbox-lifecycle-20260814171817",
+        "fix-session-visibility-review-nits": "0.0.0-fix-session-visibility-review-nits-20260818175628",
+        "fix-agent-controller-lazy-workspace": "0.0.0-fix-agent-controller-lazy-workspace-20260819202711",
+        "fix-platform-sandbox-readiness": "0.0.0-fix-platform-sandbox-readiness-20260820163514",
+        "om-continuation-hints": "0.0.0-om-continuation-hints-20260824180431",
+        "relic-pressure": "0.0.0-relic-pressure-20260828160621",
+        "knowledgev2": "0.0.0-knowledgev2-20260828164436",
+        "subconscious-alpha": "0.0.0-subconscious-alpha-20260901173138",
+        "knowledge-org-scope": "0.0.0-knowledge-org-scope-20260902233451",
+        "workshop-yj": "0.0.0-workshop-yj-20260903030708",
+        "fix-knowledge-inspector-org-scope": "0.0.0-fix-knowledge-inspector-org-scope-20260903151927",
+        "feat-subconscious-tool-guidance": "0.0.0-feat-subconscious-tool-guidance-20260904012318",
+        "tags-preview-alpha": "0.0.0-tags-preview-alpha-20260906184827",
+        "om-langfuse-session": "0.0.0-om-langfuse-session-20260910192355",
+        "client-tool-results": "0.0.0-client-tool-results-20260912062135",
+        "feat-durable-agent-evented-engine": "0.0.0-feat-durable-agent-evented-engine-20260918205958",
+        "fix-durable-evented-local-only": "0.0.0-fix-durable-evented-local-only-20260919001610",
+        "livekit-v4-beta": "0.0.0-livekit-v4-beta-20260922141955",
+        "drop-factory-ui": "0.0.0-drop-factory-ui-20260922202841",
+        "latest": "1.3.1",
+        "alpha": "1.3.2-alpha.11",
+        "marvin-deploy": "0.0.0-marvin-deploy-20260928142745"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "1.2.2",
+      "baseline_published": "2026-06-26T20:31:27.974Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 13,
+        "tools_after": 13,
+        "added": [],
+        "removed": [],
+        "description_changed": [],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "1.2.2": "dbcbbf9193e9bca254e7425e39e0df148fea6a4a1120956d58bef6abd7a4e3c1",
+          "1.3.1": "a6fe2f4b8662e5ee5be71d2a1ff5eca4542728a394439c8e47a2e18582c6eeac"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "clearMastraCourseHistory",
+          "getMastraCourseStatus",
+          "getMastraExportDetails",
+          "getMastraExports",
+          "getMastraHelp",
+          "listMastraPackages",
+          "mastraDocs",
+          "mastraMigration",
+          "nextMastraCourseStep",
+          "readMastraDocs",
+          "searchMastraDocs",
+          "startMastraCourse",
+          "startMastraCourseLesson"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@circleci/mcp-server-circleci",
+      "npm_url": "https://www.npmjs.com/package/@circleci/mcp-server-circleci",
+      "weekly_downloads": 35883,
+      "latest": "0.20.0",
+      "latest_published": "2026-08-06T19:26:31.406Z",
+      "deprecated_latest": "Deprecated: use CircleCI's hosted MCP server or CircleCI CLI MCP instead. See https://circleci.com/docs/guides/toolkit/circleci-mcp-overview/",
+      "repository": "git+https://github.com/CircleCI-Public/mcp-server-circleci.git",
+      "versions_last_window": 5,
+      "stable_versions_last_window": 5,
+      "readme_source": "README in @circleci/mcp-server-circleci@0.20.0 tarball (as shown on npmjs.com)",
+      "readme_chars": 41778,
+      "install_lines": [
+        {
+          "line_no": 59,
+          "line": "\"args\": [\"-y\", \"@circleci/mcp-server-circleci@latest\"],",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 142,
+          "line": "\"args\": [\"-y\", \"@circleci/mcp-server-circleci@latest\"],",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 220,
+          "line": "\"args\": [\"-y\", \"@circleci/mcp-server-circleci@latest\"],",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 286,
+          "line": "claude mcp add circleci-mcp-server -e CIRCLECI_TOKEN=your-circleci-token -- npx -y @circleci/mcp-server-circleci@latest",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 318,
+          "line": "\"args\": [\"-y\", \"@circleci/mcp-server-circleci@latest\"],",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 393,
+          "line": "\"@circleci/mcp-server-circleci@latest\"",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 430,
+          "line": "\"@circleci/mcp-server-circleci@latest\"",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 966,
+          "line": "\"args\": [\"-y\", \"@circleci/mcp-server-circleci@latest\"]",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1030,
+          "line": "- **Test package directly:** `npx @circleci/mcp-server-circleci@latest --help`",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 1031,
+          "line": "- **Verbose logging:** `DEBUG=* npx @circleci/mcp-server-circleci@latest`",
+          "version_spec": "latest",
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 10,
+      "bare_unversioned_lines": 0,
+      "dist_tags": {
+        "latest": "0.20.0"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "0.17.0",
+      "baseline_published": "2026-06-26T14:37:22.753Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 14,
+        "tools_after": 12,
+        "added": [],
+        "removed": [
+          "analyze_diff",
+          "run_evaluation_tests"
+        ],
+        "description_changed": [],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "0.17.0": "89d1e62ac7edc8708470e9f8d94621009e8bd5a60e7d7c0431e169729b84f2a4",
+          "0.20.0": "eff9c9fc1ae82b2fe92245744caf2ec9c616b6a606e756edf10fc57c7e957190"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "download_usage_api_data",
+          "find_flaky_tests",
+          "find_underused_resource_classes",
+          "get_build_failure_logs",
+          "get_job_test_results",
+          "get_latest_pipeline_status",
+          "list_artifacts",
+          "list_component_versions",
+          "list_followed_projects",
+          "rerun_workflow",
+          "run_pipeline",
+          "run_rollback_pipeline"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@perplexity-ai/mcp-server",
+      "npm_url": "https://www.npmjs.com/package/@perplexity-ai/mcp-server",
+      "weekly_downloads": 34171,
+      "latest": "1.3.0",
+      "latest_published": "2026-09-25T20:18:54.576Z",
+      "deprecated_latest": null,
+      "repository": "git+https://github.com/perplexityai/modelcontextprotocol.git",
+      "versions_last_window": 5,
+      "stable_versions_last_window": 5,
+      "readme_source": "README in @perplexity-ai/mcp-server@1.3.0 tarball (as shown on npmjs.com)",
+      "readme_chars": 11208,
+      "install_lines": [
+        {
+          "line_no": 42,
+          "line": "claude mcp add perplexity --env PERPLEXITY_API_KEY=\"your_key_here\" -- npx -y @perplexity-ai/mcp-server",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 56,
+          "line": "codex mcp add perplexity --env PERPLEXITY_API_KEY=\"your_key_here\" -- npx -y @perplexity-ai/mcp-server",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 82,
+          "line": "\"args\": [\"-y\", \"@perplexity-ai/mcp-server\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 3,
+      "dist_tags": {
+        "latest": "1.3.0"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "0.9.0",
+      "baseline_published": "2026-03-23T19:39:32.246Z",
+      "churn": {
+        "status": "extracted",
+        "tools_before": 4,
+        "tools_after": 4,
+        "added": [],
+        "removed": [],
+        "description_changed": [
+          "perplexity_ask",
+          "perplexity_reason",
+          "perplexity_research"
+        ],
+        "description_unknown": [],
+        "tarball_sha256": {
+          "0.9.0": "9b8432994dc1a36f851c41c4b1cad064ba2379185a693ec381f2cad96c735878",
+          "1.3.0": "ee3c083e5b27ac39b8eb2390751d08819d704f5b04aacc7b415bef5552ddf6b5"
+        },
+        "followed_dependencies": {
+          "before": {},
+          "after": {}
+        },
+        "tool_names_after": [
+          "perplexity_ask",
+          "perplexity_reason",
+          "perplexity_research",
+          "perplexity_search"
+        ]
+      },
+      "churn_reliability": "verified"
+    },
+    {
+      "package": "@modelcontextprotocol/server-puppeteer",
+      "npm_url": "https://www.npmjs.com/package/@modelcontextprotocol/server-puppeteer",
+      "weekly_downloads": 33829,
+      "latest": "2025.5.12",
+      "latest_published": "2025-05-12T21:29:35.151Z",
+      "deprecated_latest": "Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.",
+      "repository": null,
+      "versions_last_window": 0,
+      "stable_versions_last_window": 0,
+      "readme_source": "README in @modelcontextprotocol/server-puppeteer@2025.5.12 tarball (as shown on npmjs.com)",
+      "readme_chars": 7115,
+      "install_lines": [
+        {
+          "line_no": 113,
+          "line": "\"args\": [\"-y\", \"@modelcontextprotocol/server-puppeteer\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 141,
+          "line": "\"args\": [\"-y\", \"@modelcontextprotocol/server-puppeteer\"]",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 182,
+          "line": "\"args\": [\"-y\", \"@modelcontextprotocol/server-puppeteer\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 3,
+      "dist_tags": {
+        "latest": "2025.5.12"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "2025.5.12",
+      "baseline_published": "2025-05-12T21:29:35.151Z",
+      "churn": {
+        "status": "no_release_in_window",
+        "tools_now": 7
+      },
+      "churn_reliability": "n/a"
+    },
+    {
+      "package": "@modelcontextprotocol/server-brave-search",
+      "npm_url": "https://www.npmjs.com/package/@modelcontextprotocol/server-brave-search",
+      "weekly_downloads": 31531,
+      "latest": "0.6.2",
+      "latest_published": "2024-12-04T16:14:49.969Z",
+      "deprecated_latest": "Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.",
+      "repository": null,
+      "versions_last_window": 0,
+      "stable_versions_last_window": 0,
+      "readme_source": "README in @modelcontextprotocol/server-brave-search@0.6.2 tarball (as shown on npmjs.com)",
+      "readme_chars": 1898,
+      "install_lines": [
+        {
+          "line_no": 46,
+          "line": "\"@modelcontextprotocol/server-brave-search\"",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 1,
+      "dist_tags": {
+        "latest": "0.6.2"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "0.6.2",
+      "baseline_published": "2024-12-04T16:14:49.969Z",
+      "churn": {
+        "status": "no_release_in_window",
+        "tools_now": 2
+      },
+      "churn_reliability": "n/a"
+    },
+    {
+      "package": "@hubspot/mcp-server",
+      "npm_url": "https://www.npmjs.com/package/@hubspot/mcp-server",
+      "weekly_downloads": 29792,
+      "latest": "0.4.0",
+      "latest_published": "2025-06-18T16:19:19.753Z",
+      "deprecated_latest": null,
+      "repository": null,
+      "versions_last_window": 0,
+      "stable_versions_last_window": 0,
+      "readme_source": "README in @hubspot/mcp-server@0.4.0 tarball (as shown on npmjs.com)",
+      "readme_chars": 8567,
+      "install_lines": [
+        {
+          "line_no": 41,
+          "line": "\"args\": [\"-y\", \"@hubspot/mcp-server\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        },
+        {
+          "line_no": 68,
+          "line": "\"args\": [\"-y\", \"@hubspot/mcp-server\"],",
+          "version_spec": null,
+          "kind": "unpinned"
+        }
+      ],
+      "install_verdict": "all_unpinned",
+      "explicit_latest_lines": 0,
+      "bare_unversioned_lines": 2,
+      "dist_tags": {
+        "latest": "0.4.0"
+      },
+      "remote_endpoint_in_readme": false,
+      "baseline_version": "0.4.0",
+      "baseline_published": "2025-06-18T16:19:19.753Z",
+      "churn": {
+        "status": "no_release_in_window",
+        "tools_now": 21
+      },
+      "churn_reliability": "n/a"
+    }
+  ]
+}

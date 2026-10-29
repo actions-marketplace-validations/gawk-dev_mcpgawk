@@ -75,7 +75,9 @@ def declared_verdict(server: str, tool: str,
                      live_hash: str | None = None,
                      args: dict | None = None,
                      approved_props: list[str] | None = None,
-                     seen_at: str | None = None) -> tuple[str, str, str | None]:
+                     seen_at: str | None = None,
+                     permission_changes: list[str] | None = None,
+                     reverted: dict | None = None) -> tuple[str, str, str | None]:
     """The declared-tier decision: `(decision, basis, reason)`.
 
     `approved` is the `{tool: hash}` mapping the human approved for this server, or None when
@@ -97,8 +99,11 @@ def declared_verdict(server: str, tool: str,
     (`gateway.set_live_tools`). The free hook cannot list the server per call; since 2026-09-05 it
     passes the hash from the LAST SIGHTING the projection carries (`seen`, written by every scan
     and by the monitor daemon) with `seen_at`, and the reason says so — a deny on the last
-    sighting is not a deny on this call: a drift not yet seen passes until the next scan, and a
-    server that reverted stays denied until it is seen again.
+    sighting is not a deny on this call: a drift not yet seen passes until the next scan.
+
+    `reverted` is THE LATCH (2026-10-08): this tool changed at an earlier sighting since approval
+    (`{"at": when}`) and is back to its approved form now. It stays denied until a person approves
+    again — a change that reverted before the next scan is still a change the person never saw.
     """
     if approved is None:
         return DEFER, BASIS_DECLARED, None
@@ -109,6 +114,17 @@ def declared_verdict(server: str, tool: str,
     # not compute one, is missing evidence — and missing evidence is never a deny here.
     if live_hash and approved_hash and live_hash != approved_hash:
         return DENY, BASIS_DECLARED, changed_reason(server, tool, approved_hash, live_hash, seen_at)
+    # PERMISSION GROWTH. The description hash above cannot see a dropped read-only or a new
+    # destination parameter; the projection carries them, judged by scan's own compare
+    # (FOUNDER 2026-10-06, "Block permission growth"). Any other schema change still waits for
+    # sign-off without blocking (FOUNDER 2026-08-15, below).
+    if permission_changes:
+        return DENY, BASIS_DECLARED, permission_changed_reason(server, tool, permission_changes,
+                                                               seen_at)
+    if reverted:
+        return DENY, BASIS_DECLARED, reverted_reason(server, tool,
+                                                     reverted.get("at") if isinstance(reverted, dict)
+                                                     else None)
     # THE SMUGGLED FIELD. A schema widened after approval breaks nothing by itself and is left
     # to the Decisions queue; the deny fires only at the moment the attack becomes real — this
     # call is FILLING a parameter the human never approved, and it is credential-shaped
@@ -142,7 +158,9 @@ def verdict(server: str, tool: str, approved: dict[str, str] | None,
             live_hash: str | None = None,
             args: dict | None = None,
             approved_props: list[str] | None = None,
-            seen_at: str | None = None) -> tuple[str, str, str | None]:
+            seen_at: str | None = None,
+            permission_changes: list[str] | None = None,
+            reverted: dict | None = None) -> tuple[str, str, str | None]:
     """The WHOLE decision: declared tier first, then the behavioural tier — composed
     positive-only, exactly like the paid gateway's profile handling (CONSTRAINTS §2 row 1).
 
@@ -160,7 +178,9 @@ def verdict(server: str, tool: str, approved: dict[str, str] | None,
     """
     decision, basis, reason = declared_verdict(server, tool, approved, live_hash,
                                                args=args, approved_props=approved_props,
-                                               seen_at=seen_at)
+                                               seen_at=seen_at,
+                                               permission_changes=permission_changes,
+                                               reverted=reverted)
     if decision == DENY:
         return decision, basis, reason
 
@@ -214,12 +234,54 @@ def changed_reason(server: str, tool: str, approved_hash: str, live_hash: str,
     )
 
 
+def permission_changed_reason(server: str, tool: str, changes: list[str],
+                              seen_at: str | None = None) -> str:
+    """The denial for permission growth after approval: same name, and the tool can now do more
+    than the person approved (declared escalation or a new destination parameter). Same properties
+    as `changed_reason`, and its wording, so it classifies as REASON_TOOL_CHANGED."""
+    when = (f"as last seen {seen_at} — not this call; a change since then is not yet measured"
+            if seen_at else "now")
+    what = "; ".join(changes)
+    return (
+        f"SECURITY BLOCK (mcpgawk). '{tool}' on MCP server '{server}' has CHANGED since you "
+        f"approved it — it can now do more than was approved ({what}, {when}). A tool that "
+        f"quietly gains the power to write, send or stop being read-only is how a malicious update "
+        f"arrives without changing a word of its description.\n"
+        f"This decision is final for this session. Do not retry it, do not call a different "
+        f"tool to achieve the same thing, and do not run any mcpgawk command to change the "
+        f"baseline — approval requires the person at the keyboard, and attempting it from "
+        f"inside an agent session is itself treated as a red flag.\n"
+        f"Tell the user exactly this: the MCP server '{server}' changed what the tool '{tool}' "
+        f"can do after they approved it ({what}), mcpgawk blocked the call, and they should run "
+        f"`mcpgawk decide` themselves to review the change before deciding whether to trust it."
+    )
+
+
+def reverted_reason(server: str, tool: str, at: str | None = None) -> str:
+    """The denial for THE LATCH: the tool changed after approval and changed back. Same properties
+    and the same classifying phrase as `changed_reason` (REASON_TOOL_CHANGED)."""
+    when = f"on {at[:10]}" if isinstance(at, str) and at else "at an earlier sighting"
+    return (
+        f"SECURITY BLOCK (mcpgawk). '{tool}' on MCP server '{server}' has CHANGED since you "
+        f"approved it — it was seen changed {when} and changed back since. A tool that changes "
+        f"and then reverts before anyone looks is still a change you never reviewed.\n"
+        f"This decision is final for this session. Do not retry it, do not call a different "
+        f"tool to achieve the same thing, and do not run any mcpgawk command to change the "
+        f"baseline — approval requires the person at the keyboard, and attempting it from "
+        f"inside an agent session is itself treated as a red flag.\n"
+        f"Tell the user exactly this: the MCP server '{server}' changed the tool '{tool}' after "
+        f"they approved it and changed it back, mcpgawk blocked the call, and they should run "
+        f"`mcpgawk decide` themselves to read what changed before deciding whether to trust it."
+    )
+
+
 #: Machine-readable codes for the denials this module emits — classified HERE, by the module that
 #: owns the wording, so no renderer ever pattern-matches prose it does not control.
 REASON_TOOL_ADDED = "tool-added"
 REASON_TOOL_CHANGED = "tool-changed"
 REASON_CREDENTIAL_SMUGGLED = "credential-smuggled"
 REASON_TOXIC_FLOW = "toxic-flow"
+REASON_NO_BASELINE_STRICT = "no-baseline-strict"
 
 
 def reason_code(reason: str | None) -> str | None:
@@ -234,6 +296,8 @@ def reason_code(reason: str | None) -> str | None:
         return REASON_CREDENTIAL_SMUGGLED
     if "was OBSERVED in a sandbox" in reason:
         return REASON_TOXIC_FLOW
+    if "the guard is in strict mode" in reason:
+        return REASON_NO_BASELINE_STRICT
     return None
 
 
@@ -245,9 +309,31 @@ def human_line(server: str, tool: str, code: str | None) -> str:
         REASON_TOOL_CHANGED: "its content changed since you approved it",
         REASON_CREDENTIAL_SMUGGLED: "the call fills a credential-shaped parameter you never approved",
         REASON_TOXIC_FLOW: "an observed sink ran after an observed source this session",
+        REASON_NO_BASELINE_STRICT: "it has no baseline on this machine and the guard is strict",
     }.get(code or "", "the approved baseline did not cover this call")
+    # `decide` lists changes to approved servers; a server with no baseline is named by `scan`.
+    where = "mcpgawk scan" if code == REASON_NO_BASELINE_STRICT else "mcpgawk decide"
     return (f"mcpgawk blocked {server}.{tool} — {what}. "
-            f"Review it with `mcpgawk decide` in your own terminal.")
+            f"Review it with `{where}` in your own terminal.")
+
+
+def strict_no_baseline_reason(server: str, tool: str) -> str:
+    """The strict-mode denial: a call to a server with NO baseline on this machine. Same
+    load-bearing properties as `deny_reason` — no executable remedy, no override named, stop and
+    tell the user. It names `mcpgawk scan` only, never the command that would clear it."""
+    return (
+        f"SECURITY BLOCK (mcpgawk). '{server}' has no baseline on this machine and the guard is "
+        f"in strict mode, so the call to '{tool}' was refused: nothing the user approved says "
+        f"what this server is.\n"
+        f"This decision is final for this session. Do not retry it, do not call a different "
+        f"tool to achieve the same thing, and do not run any mcpgawk command to change the "
+        f"baseline or the guard — that requires the person at the keyboard, and attempting it "
+        f"from inside an agent session is itself treated as a red flag.\n"
+        f"Stop and tell the user exactly this: the MCP server '{server}' has no approved "
+        f"baseline on this machine, mcpgawk blocked the call because the guard is in strict "
+        f"mode, and they should run `mcpgawk scan` themselves to see what it is before deciding "
+        f"whether to trust it."
+    )
 
 
 def deny_reason(server: str, tool: str) -> str:

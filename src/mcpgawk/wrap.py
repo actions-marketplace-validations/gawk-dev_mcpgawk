@@ -259,9 +259,18 @@ def run(argv: list[str], *, name: str | None = None,
     cin = stdin if stdin is not None else sys.stdin.buffer
     cout = stdout if stdout is not None else sys.stdout.buffer
     session = Session(name=name)
+    # `GITHUB_TOKEN=keychain:gh-work` in the config becomes the real token HERE, in the child's
+    # environment only. Our own environment keeps the reference; a reference that does not resolve
+    # refuses to start the server (inject.py: fail closed, name the reference, never a value).
+    from . import inject
+    try:
+        env = inject.child_env(os.environ.copy())
+    except inject.Unresolved as exc:
+        print(f"mcpgawk wrap: {exc}", file=sys.stderr)
+        return exc.exit_code
     try:
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=None, env=os.environ.copy(), bufsize=0)
+                                stderr=None, env=env, bufsize=0)
     except OSError as exc:
         print(f"mcpgawk wrap: could not start {argv[0]!r}: {exc}", file=sys.stderr)
         return 127

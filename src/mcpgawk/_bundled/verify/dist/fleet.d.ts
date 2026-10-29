@@ -1,3 +1,4 @@
+import type { SharedBaselineShape } from "./pins.js";
 /**
  * Fleet discovery — the servers actually configured on THIS machine, across every AI tool
  * (Claude Desktop, Cursor, Claude Code, Codex, Gemini CLI, …). This deliberately shells out to the
@@ -12,7 +13,7 @@
 export type FleetSpec = Record<string, unknown>;
 export interface FleetServer {
     readonly name: string;
-    /** REVIEW / CLEAN / SKIPPED / UNREACHABLE / AUTH / NOT-SCANNABLE — mcpgawk's own state vocabulary. */
+    /** REVIEW / CLEAN / SKIPPED / UNREACHABLE / NOT-MCP / AUTH / NOT-SCANNABLE — mcpgawk's own state vocabulary. */
     readonly state: string;
     readonly detail: string;
     readonly url: string | null;
@@ -37,15 +38,9 @@ export interface Fleet {
  * list that would read as "you have no servers".
  */
 /** The shared baseline, read from the free engine — see src/mcpgawk/baseline.py. */
-export interface SharedBaseline {
-    readonly schema: string;
-    readonly servers: Record<string, {
-        pin?: string;
-        tools?: Record<string, string>;
-        approved_at?: string;
-        aliases?: string[];
-    }>;
-}
+/** Servers keyed by store identity, `names` (config name → key) and each entry's `tools_basis`;
+ *  the shape lives beside the comparison that reads it (pins.ts). */
+export type SharedBaseline = SharedBaselineShape;
 /**
  * Read the ONE approved baseline instead of keeping a private one.
  *
@@ -62,7 +57,7 @@ export declare function discoverFleet(timeoutMs?: number, launchLocal?: boolean)
 /** Every fleet state this maps deliberately. Exported so the browser's copy can be GENERATED from
  * `stateStatus` rather than hand-written — serve.ts held a second, already-drifted transcription
  * of this table, and a table maintained twice is a table that disagrees with itself. */
-export declare const FLEET_STATES: readonly ["CLEAN", "REVIEW", "VULNERABLE", "AUTH", "FAILED", "TIMED-OUT", "SKIPPED", "UNREACHABLE", "NOT-SCANNABLE"];
+export declare const FLEET_STATES: readonly ["CLEAN", "REVIEW", "VULNERABLE", "AUTH", "FAILED", "TIMED-OUT", "SKIPPED", "UNREACHABLE", "NOT-MCP", "NOT-SCANNABLE"];
 /** mcpgawk state → the report's status vocabulary + a colour role, so the fleet and a verify report
  * speak the same visual language. */
 export declare function stateStatus(state: string): {

@@ -106,6 +106,19 @@ _PII = [
 _ALL = _SECRETS + _PII
 
 
+def register_value(value: str) -> None:
+    """Mask THIS exact value from now on, whatever its shape. For a credential the launch line
+    resolved out of the Keychain (inject.py): it has no vendor prefix we can pattern-match, so the
+    only way a log line is guaranteed never to carry it is to know it. Process-local, never
+    persisted; the value is held only as a compiled pattern. Short values are refused — masking a
+    three-character string would shred ordinary prose."""
+    if not isinstance(value, str) or len(value) < 8:
+        return
+    pattern = re.compile(re.escape(value))
+    if pattern.pattern not in {p.pattern for p in _ALL}:
+        _ALL.append(pattern)
+
+
 def redact(text: str | None) -> str | None:
     """Replace credential and PII shapes with a placeholder. ``None`` in, ``None`` out.
 

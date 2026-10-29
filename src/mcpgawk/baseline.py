@@ -131,6 +131,7 @@ def export(path: str | None = None) -> dict[str, Any]:
     Only APPROVED state crosses this boundary — never the sighting history. What a server looked
     like last Tuesday is scan's business; what the operator has agreed to trust is everyone's.
     """
+    from . import drift   # local, like publish's: keeps the module graph acyclic
     store = history.load(path or history.default_path())
     out: dict[str, Any] = {}
     for key, entry in (store.get("servers") or {}).items():
@@ -142,10 +143,23 @@ def export(path: str | None = None) -> dict[str, Any]:
         out[key] = {
             "pin": rec.get("pin"),
             "tools": dict(rec.get("tools") or {}),
+            # WHICH RULE minted `tools` (drift.TOOLS_BASIS_*): 1 = hash(description) as scan writes
+            # it, 2 = fingerprint.surface_hashes as the monitor spine publishes it. Without it a
+            # reader cannot tell the two apart and diffs one against the other — verify did, and
+            # would have called every tool of an unchanged scan-approved server changed. The
+            # deduction (`tools_basis_of`), not the raw field, so a pre-field record still says.
+            "tools_basis": drift.tools_basis_of(rec),
             # The approval's OWN time and actor when recorded (2026-09-03 on); before that the
             # sighting's measurement time stood in for it, and `approved_by` is honestly absent.
             "approved_at": entry.get("approved_at"),      # None until the approval itself is dated
             "approved_by": entry.get("approved_by"),
+            # "approve" / "first-sighting" / None (older than the field). Additive.
+            "baseline_origin": history.baseline_origin(store, key),
+            # Why an "unattended" baseline had no person behind it (`history.unattended_reason`), or None.
+            "unattended_reason": history.unattended_reason(store, key),
+            # What the approval accepted against the previous one, and why if the person said.
+            "approved_change": entry.get("approved_change"),
+            "approved_reason": entry.get("approved_reason"),
             "measured_at": rec.get("measured_at"),        # the sighting's time — a different fact
             "aliases": list(entry.get("aliases") or []),
             "annotations": {
@@ -154,7 +168,31 @@ def export(path: str | None = None) -> dict[str, Any]:
                 if isinstance(ident, str) and ident.startswith("tool.") and isinstance(ann, dict)
             },
         }
-    return {"schema": SCHEMA, "servers": out}
+    return {"schema": SCHEMA, "servers": out, "names": _names_index(store, out)}
+
+
+def _names_index(store: dict[str, Any], exported: dict[str, Any]) -> dict[str, str]:
+    """Every name another runtime may hold for an exported server -> its key in `servers`.
+
+    `servers` is keyed by STORE IDENTITY (`mcp:<asserted name>`); verify knows only the CONFIG name
+    from mcp.json, so its `servers[name]` lookup never hit and the shared baseline was silently
+    never consulted. Resolution stays HERE, through `history.resolve` — the one rule approve, scan
+    and the guard use — so a name that is ambiguous, or that resolves to a record with no approval,
+    is absent rather than answered by first match. Entries are never duplicated under an alias:
+    every consumer that iterates `servers` would double-count."""
+    candidates: set[str] = set()
+    for key, entry in (store.get("servers") or {}).items():
+        candidates.add(key)
+        if key.startswith("mcp:"):
+            candidates.add(key[len("mcp:"):])
+        if isinstance(entry, dict):
+            candidates.update(a for a in entry.get("aliases") or [] if isinstance(a, str))
+    index: dict[str, str] = {}
+    for name in sorted(candidates):
+        key = history.resolve(store, name)
+        if key is not None and key in exported:
+            index[name] = key
+    return index
 
 
 #: Re-exported so every pillar raises and catches ONE exception type, and so this stays a single
@@ -186,6 +224,7 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
     decision, the same file — correctly refused at exit 4.
     """
     history.require_human_approval()
+    evidence = history.approval_evidence("pillar")
     p = path or history.default_path()
     with history.locked(p):
         store = history.load(p)
@@ -238,9 +277,16 @@ def publish(key: str, *, pin: str, tools: dict[str, str], approved_at: str,
             # the old surface; this call is replacing the pin and the tool set. Carrying them over
             # would enforce yesterday's labels on today's tools, which reads as coverage and is not.
             record.pop("annotations", None)
+        history.keep_original(entry, record, "approve")
         entry["approved"] = record
+        history.clear_review(entry)           # the held change is answered by this approval
+        entry["approved_via"] = "approve"     # gated by require_human_approval above
+        entry["approved_evidence"] = evidence
         if alias:
             entry["aliases"] = sorted(set(entry.get("aliases", [])) | {alias})
+        # The same approval, so the same fleet admission: a monitor approve of an appeared server
+        # must end its appeared state exactly as `mcpgawk approve` does.
+        history.admit_to_fleet(store, key)
         history.save(store, p)
 
 

@@ -16,6 +16,7 @@ Read-only by construction: it opens stores, never writes them, and never starts 
 from __future__ import annotations
 
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -98,13 +99,17 @@ def hook_health_by_client() -> dict[str, str]:
     return out
 
 
-def render(*, hook_health: dict[str, str], guard_path: Path | None,
+def render(*, hook_health: dict[str, str], guard_path: "dict[str, Path] | Path | None",
            agents: dict[str, int], baseline_total: int, pending: list[str],
+           baseline_words: str | None = None,
+           pending_keys: list[str] | None = None,
            behaviour_tools: int | None, enforce_available: bool,
            last_activity: str | None, activity: dict | None = None,
            muted_total: int = 0, behavioural_unavailable: str | None = None,
            monitor_open: int | None = None, baseline_error: str | None = None,
-           agents_error: str | None = None, unprotected: str | None = None) -> str:
+           agents_error: str | None = None, unprotected: str | None = None,
+           appeared: dict | None = None, appeared_since: str | None = None,
+           appeared_states: dict | None = None, appeared_error: str | None = None) -> str:
     """The whole picture, ordered by what the reader must act on.
 
     `behaviour_tools is None` means "no profile" — distinct from 0, which would mean a profile that
@@ -152,8 +157,15 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
             # The honest one. Saying nothing here is how a gap becomes a belief of safety.
             out.append(f"      {name:<{width}}  --   no hook point; {count} server(s) reachable "
                        f"without a check")
-    if any(h != "absent" for h in hook_health.values()) and guard_path:
-        out.append(f"      hook: {guard_path}")
+    # EACH AGENT'S OWN HOOK FILE, and only where that agent has one. One path — Claude Code's
+    # settings.json — was printed whenever ANY agent had a hook, so a Cursor-only machine read
+    # "hook: ~/.claude/settings.json", a file that did not exist (e2e, 2026-10-05). A bare Path is
+    # Claude Code's, as it always was.
+    paths = guard_path if isinstance(guard_path, dict) else (
+        {"claude-code": guard_path} if guard_path else {})
+    for client in sorted(hook_health):
+        if hook_health[client] != "absent" and paths.get(client):
+            out.append(f"      {_label(client)} hook: {paths[client]}")
 
     out += ["", "  EXPECTED BEHAVIOUR"]
     if baseline_error:
@@ -162,7 +174,8 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
         out.append(f"      ⚠ could not read your approved baseline ({baseline_error}) — the "
                    f"number of approved servers is UNKNOWN, not zero.")
     else:
-        out.append(f"      {baseline_total} server(s) at an approved baseline (what they may expose)")
+        out.append(f"      {baseline_total} server(s) "
+                   f"{baseline_words or 'at a baseline'} (what they may expose)")
     if behavioural_unavailable:
         # B5 — never a silent fallback: the missing dependency is named BEFORE any name-only
         # posture is described, and no dead command (`mcpgawk verify` cannot run here) is offered.
@@ -182,11 +195,31 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
                    f"(mcpgawk wrong — still listed on scans, never hidden)")
     if pending:
         out.append("")
-        out.append(f"      {len(pending)} server(s) changed since you approved them — blocked until")
+        out.append(f"      {len(pending)} server(s) changed since their baseline — blocked until")
         out.append("      you decide:")
         for name in pending[:10]:
             out.append(f"          {name}")
-        out.append("      Review: mcpgawk scan     Accept: mcpgawk approve <name>")
+        out.append("      Review: mcpgawk scan")
+        # The exact command per server, by key: a display name can be a whole command line with
+        # spaces, which `approve <name>` cannot take unquoted (new-developer walk, 2026-09-26).
+        keys = list(pending_keys or [])
+        if keys:
+            out.append("      Accept:")
+            for key in keys[:10]:
+                out.append(f"          mcpgawk approve {shlex.quote(key)}")
+        else:
+            out.append("      Accept: mcpgawk approve <name>")
+    if appeared_error:
+        # Said, never an empty block: "nothing appeared" and "could not look" must not read alike.
+        out += ["", f"      ⚠ the fleet check could not run ({appeared_error}) — a server that "
+                    f"appeared since your fleet approval would NOT be named here."]
+    elif appeared and appeared_since:
+        # THE SAME WORDS the scan prints, from the same function: one rule, one wording.
+        from .cli import appeared_lines
+        out.append("")
+        out += ["    " + line for line in appeared_lines(appeared, appeared_since,
+                                                         appeared_states or {},
+                                                         "no baseline recorded")]
 
     out += ["", "  DEEP MONITORING (arguments, responses, toxic flow, hash-chained log)"]
     if enforce_available:
@@ -221,7 +254,7 @@ def render(*, hook_health: dict[str, str], guard_path: Path | None,
             out.append("      how many were actually CHECKED is not recorded in this log "
                        "(written before the distinction existed)")
         else:
-            out.append(f"      {checked} actually checked against an approved baseline")
+            out.append(f"      {checked} actually checked against a baseline")
         if deferred:
             out.append(f"      ⚠ {deferred} call(s) NOT checked — the guard declined (no or stale "
                        f"baseline projection) and let them through. Run `mcpgawk scan`.")
@@ -258,15 +291,17 @@ def collect() -> dict:
     from . import history
 
     try:
-        from .guard import CLAUDE_USER_SETTINGS
+        from .agents import ADAPTERS
         # Per-agent, and asked of each agent's own config — not one boolean sniffed out of the
         # prose of `guard status` ("NOT installed" not in text), which could not distinguish a
         # broken hook from a working one and knew nothing about any agent but Claude Code.
         hook_health = hook_health_by_client()
-        guard_path: Path | None = CLAUDE_USER_SETTINGS
+        # The file each agent's hook lives in — the one `hook_health_for` read.
+        guard_path: dict[str, Path] | None = {k: a.config for k, a in ADAPTERS.items()}
     except Exception:                              # noqa: BLE001
         hook_health, guard_path = {}, None
 
+    agents_error: str | None
     try:
         from .discover import discover_servers
         found = discover_servers()
@@ -290,13 +325,48 @@ def collect() -> dict:
         store, baseline_error = history.load_checked(history.default_path())
         servers = store.get("servers") or {}
         pending_keys = history.pending(store)
-        baseline_total = len([k for k in servers if k not in pending_keys])
+        # APPROVED, not merely "not pending". `pending()` skips every entry with no approved record,
+        # so a held sighting — a server that appeared after the fleet approval and that nobody has
+        # approved — was counted here as "at an approved baseline" (walk, 2026-10-05). The panel's
+        # policy row and protect's "Protected" count already asked this question.
+        from .protect import at_approved_baseline
+        _covered = at_approved_baseline(store, pending_keys)
+        baseline_total = len(_covered)
+        # The words follow the records' origins — history's one rule, shared with the bare
+        # run's Protected line and the panel's See step (2026-10-09).
+        baseline_words = history.at_baseline_words_for(store, _covered)
         # Resolve to what the USER calls each server, not our internal identity key.
         pending = [history.display_name(store, k) for k in pending_keys]
         muted_total = history.muted_total(store)
     except Exception as exc:                       # noqa: BLE001
-        pending, baseline_total, muted_total = [], 0, 0
+        pending, pending_keys, baseline_total, muted_total = [], [], 0, 0
+        baseline_words = None
         baseline_error = f"{type(exc).__name__}: {exc}"
+        store = None
+
+    # APPEARED — the one helper the scan and the panel use, over the same store and discovery.
+    appeared: dict = {}
+    appeared_since: str | None = None
+    appeared_states: dict[str, str] = {}
+    appeared_error: str | None = None
+    try:
+        # An unreadable store is already said, louder, by the baseline line ("UNKNOWN, not
+        # zero"); a second warning would only repeat it. Discovery failing is NOT said anywhere
+        # else on a machine with a fleet approved, so it is said here.
+        if store is not None and not baseline_error:
+            if agents_error and (history.fleet_baseline(store) or history.held(store)):
+                raise RuntimeError(f"discovery failed: {agents_error}")
+            if not agents_error:
+                appeared, appeared_since = history.appeared_now(store, entries)
+        for _name in appeared:
+            _key = next((k for k, v in servers.items()
+                         if _name in ((v or {}).get("aliases") or [])), None)
+            if _key and store is not None and history.approved(store, _key) is not None:
+                appeared_states[_name] = ("the server it reaches already had a baseline, and "
+                                          "changes are measured from that")
+    except Exception as exc:                       # noqa: BLE001 - say it, never go quiet
+        appeared, appeared_since = {}, None
+        appeared_error = f"{type(exc).__name__}: {exc}"
 
     behaviour_tools: int | None = None
     try:
@@ -385,12 +455,15 @@ def collect() -> dict:
 
     return dict(hook_health=hook_health, guard_path=guard_path, agents=agents,
                   agents_error=agents_error,
-                  baseline_total=baseline_total, pending=pending,
+                  baseline_total=baseline_total, baseline_words=baseline_words,
+                  pending=pending, pending_keys=pending_keys,
                   baseline_error=baseline_error,
                   behaviour_tools=behaviour_tools, enforce_available=enforce_available,
                   last_activity=last_activity, activity=activity, muted_total=muted_total,
                   behavioural_unavailable=behavioural_unavailable,
-                  monitor_open=monitor_open, unprotected=unprotected)
+                  monitor_open=monitor_open, unprotected=unprotected,
+                  appeared=appeared, appeared_since=appeared_since,
+                  appeared_states=appeared_states, appeared_error=appeared_error)
 
 
 def collect_and_render() -> str:
@@ -429,6 +502,10 @@ def to_json(collected: dict, panel_data: dict | None = None) -> dict:
         "activity": collected.get("activity"),
         "pending": list(collected.get("pending") or []),
         "baseline_total": collected.get("baseline_total"),
+        # Servers in an agent config since the fleet approval, by the scan's own rule. A consumer
+        # reading `baseline_total` alone could not learn that anything had appeared.
+        "appeared": sorted(collected.get("appeared") or {}),
+        "appeared_since": collected.get("appeared_since"),
         "muted_total": collected.get("muted_total"),
         "behaviour_tools": collected.get("behaviour_tools"),
         "behavioural_unavailable": collected.get("behavioural_unavailable"),
@@ -437,7 +514,8 @@ def to_json(collected: dict, panel_data: dict | None = None) -> dict:
         "monitor_open": collected.get("monitor_open"),
         "last_activity": collected.get("last_activity"),
         "errors": {k: v for k, v in (("agents", collected.get("agents_error")),
-                                     ("baseline", collected.get("baseline_error"))) if v},
+                                     ("baseline", collected.get("baseline_error")),
+                                     ("appeared", collected.get("appeared_error"))) if v},
     }
     try:
         from . import panel

@@ -38,6 +38,20 @@ from . import dxt
 TABS = ("fleet", "runtime", "evidence", "decisions")
 
 
+
+
+def _dict_at(d: Any, key: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
+    """`d[key]` when it is a dict, else a FRESH default (`{}` unless given). Reads the key once — the
+    inline `d.get(k) if isinstance(d.get(k), dict) else {}` it replaces was correct at runtime but
+    left the type checker unable to see the narrowing (26 mypy errors in this file, 2026-09-25)."""
+    v = d.get(key) if isinstance(d, dict) else None
+    return v if isinstance(v, dict) else ({} if default is None else default)
+
+def _run_kind(r) -> str:
+    """runlog.display_kind, imported lazily like every other runlog use in this module (D18)."""
+    from . import runlog as _runlog_mod
+    return _runlog_mod.display_kind(r)
+
 def _esc(v: object) -> str:
     """HTML-escape a value — and render a missing one as nothing.
 
@@ -134,6 +148,22 @@ def collect() -> dict[str, Any]:
     except Exception as exc:                       # noqa: BLE001
         data["store"], data["pending"] = {"servers": {}}, []
         data["errors"]["baseline"] = f"{type(exc).__name__}: {exc}"
+
+    # APPEARED — the scan's and status's ONE helper, over the same store and the configs as
+    # written. Failure is an error tile, never an empty set: "nothing appeared" and "could not
+    # look" must not render alike.
+    data["appeared"], data["appeared_since"] = {}, None
+    try:
+        if "fleet" in data["errors"] and (history.fleet_baseline(data["store"])
+                                          or history.held(data["store"])):
+            raise RuntimeError(f"discovery failed: {data['errors']['fleet']}")
+        _app, _since = history.appeared_now(data["store"], data.get("entries") or {})
+        data["appeared"] = {str(n): [[str(k), dict(t)] for k, t in v] for n, v in _app.items()}
+        data["appeared_since"] = _since
+    except Exception as exc:                       # noqa: BLE001
+        data["errors"]["appeared"] = (f"the fleet check could not run ({type(exc).__name__}: "
+                                      f"{exc}) — a server that appeared since your fleet approval "
+                                      f"would NOT be named")
 
     try:
         data["activity"] = spool.summarise()
@@ -243,7 +273,7 @@ def collect() -> dict[str, Any]:
                     # rows of "?" against the founder's real file. `candidate` is kept only as a
                     # fallback so an older report still parses.
                     cand = f.get("candidate") or {}
-                    ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
+                    ev = _dict_at(f, "evidence")
                     where = [str(x) for x in (ev.get("egress") or ev.get("hosts") or [])][:4]
                     _hosts = [str(x) for x in ((f.get("evidence") or {}).get("egress")
                                                or (f.get("evidence") or {}).get("hosts") or [])]
@@ -288,7 +318,7 @@ def collect() -> dict[str, Any]:
         # never runs, so the common case costs one read rather than one read per server.
         _wrapped_names = {str(r.get("server")) for r in spool.read(limit=100000)
                           if r.get("adapter") == "wrap" and r.get("server")}
-        _store_w = data.get("store") if isinstance(data.get("store"), dict) else {"servers": {}}
+        _store_w = _dict_at(data, "store", {"servers": {}})
         for _k in (_store_w.get("servers") or {}) if _wrapped_names else ():
             try:
                 _names_k = {str(_k), history.display_name(_store_w, str(_k))} | {
@@ -324,7 +354,7 @@ def collect() -> dict[str, Any]:
     # 2026-09-07 the dashboard read only the engine's `suppressed` flag and /next read only the
     # store: a mute from /next left the Findings tab unchanged.
     try:
-        _st = data.get("store") if isinstance(data.get("store"), dict) else {"servers": {}}
+        _st = _dict_at(data, "store", {"servers": {}})
         for _rec in data["findings"]:
             _rec["muted"] = finding_id(_rec) in history.muted(
                 _st, history.resolve(_st, str(_rec.get("server") or "")))
@@ -377,7 +407,7 @@ def _agent_rows(d: dict[str, Any]) -> list[tuple[str, str, str, int, str]]:
                 #
                 # The counts are MACHINE-WIDE — the spool records no per-client breakdown — so the
                 # wording says "on this machine" rather than implying it measured this agent.
-                act = d.get("activity") if isinstance(d.get("activity"), dict) else {}
+                act = _dict_at(d, "activity")
                 seen = act.get("calls") or 0
                 checked, deferred = act.get("checked"), act.get("deferred") or 0
                 if checked is None:
@@ -444,13 +474,21 @@ def _agent_rows(d: dict[str, Any]) -> list[tuple[str, str, str, int, str]]:
 #: the page.
 TIERS = (
     ("blocked", "Blocked", "a call was denied — the guard stopped something"),
-    ("changed", "Changed", "moved since you approved it; your agents cannot call it"),
+    # APPEARED: in an agent config since `approve --fleet`, never approved by anyone. The scan has
+    # named these since 0.1.68; the panel counted them as Unverified (or, held, nowhere) until
+    # 2026-10-05, so one HOME read "1 appeared" in the terminal and nothing at all here.
+    ("appeared", "Appeared", "in an agent config since your fleet approval — named, not trusted; "
+                             "nothing you approved to check its calls against"),
+    ("changed", "Changed", "moved off its baseline; your agents cannot call it"),
     # "With findings", not "Findings": every tier counts SERVERS, and the Findings tab's badge
     # counts FINDINGS. One page read "5 Findings" in the radar and "6" on the Findings tab —
     # the same word, two units (live 2026-09-03). The label now carries its unit.
     ("findings", "With findings", "verification caught it doing something — exfiltration, SSRF "
                                   "or injected output"),
-    ("unverified", "Unverified", "never watched — absence of a finding, not safety"),
+    # NOT "never watched": a server verify exercised but nobody approved lands here too (A,
+    # 2026-10-05) — it was watched, and there was no approval to verify it against.
+    ("unverified", "Unverified", "not verified against a baseline — absence of a finding, "
+                                 "not safety"),
     # OBSERVED IS NOT VERIFIED, AND SAYS SO IN ITS OWN NAME. A session-bound-auth server can never
     # be verified here: the login belongs to the client's live session and verify's own session
     # times out. `wrap` rides that authenticated pipe and watches the real calls — real evidence,
@@ -460,8 +498,18 @@ TIERS = (
     # verification, which is the mistake observed.py exists to make impossible.
     ("observed", "Observed (wrap)", "watched in your client's real traffic — observation, not "
                                     "reproduction: the sandbox checks were not run"),
-    ("baseline", "At baseline", "matches what you approved, and behaviour was observed"),
+    # "VERIFIED", NOT "AT BASELINE" — the label only; the key stays "baseline" so URLs, filters
+    # and stored state keep working. The journey says "N at an approved baseline" (approved, as
+    # `mcpgawk status` counts it); this tier also needs behaviour observed. One page read "1 at an
+    # approved baseline" beside "At baseline 0" (walk, 2026-10-05): one word, two facts. The
+    # tier's own name is now the pair of "Unverified".
+    # "its baseline", not "what you approved": the record may be a first sighting (2026-10-09).
+    ("baseline", "Verified", "matches its baseline, and behaviour was observed"),
 )
+
+
+#: What is true of a held sighting whose config entry has gone — never "approved".
+_HELD_GONE = "appeared, then removed from every config — never approved"
 
 
 def _classify(name: str, key: str | None, d: dict) -> str:
@@ -474,6 +522,18 @@ def _classify(name: str, key: str | None, d: dict) -> str:
             c.get("decision") == "deny" for c in (d.get("recent_calls") or [])
             if c.get("server") == name):
         return "blocked"
+    # APPEARED outranks everything a baseline answers: there is no approved surface to have
+    # changed from, and a finding on a server nobody accepted is still, first, a server nobody
+    # accepted. A strict-mode deny keeps "blocked" above — and Today says "appeared" in its why.
+    # DELIBERATELY ABOVE "changed", including the one case where it costs a count: a config entry
+    # now pointing at a target the fleet never approved, reaching a server identity that HAS a
+    # baseline and has drifted from it. That server is pending AND appeared; it shows as Appeared,
+    # so the Changed chip can read lower than the pending count. The drift is measured from a
+    # baseline this config entry was never vouched for — the first question is whether the entry
+    # belongs at all, and approving it (which admits the entry) puts the drift back in front.
+    # Pinned by test_approve_ends_appeared::test_a_changed_target_with_pending_drift_….
+    if name in (d.get("appeared") or {}):
+        return "appeared"
     # Convictions outrank "changed" and "unverified": a server verification CAUGHT doing something
     # is a stronger statement than one whose declared surface moved, and it must never fall through
     # to "baseline" just because it was observed.
@@ -502,7 +562,25 @@ def _classify(name: str, key: str | None, d: dict) -> str:
         if name in _obs or (key and str(key) in _obs):
             return "observed"
         return "unverified"
+    # VERIFIED MEANS "AGAINST WHAT YOU APPROVED". An exercised run on a server with no approved
+    # record — no store entry, or one with no sighting — put it here (property suite, 2026-10-05).
+    # With nothing approved there is nothing to have matched: it is Unverified, the pair of this
+    # tier. Not Observed: that tier says the sandbox checks were NOT run, and here they were.
+    if not _has_approval(d, key):
+        return "unverified"
     return "baseline"
+
+
+def _has_approval(d: dict, key: str | None) -> bool:
+    """`history.approved(store, key) is not None` — the rule `status` and `protect` count by —
+    guarded for a key with no store entry and for a damaged entry that is not an object."""
+    if not key:
+        return False
+    servers = (d.get("store") or {}).get("servers") if isinstance(d.get("store"), dict) else None
+    if not isinstance(servers, dict) or not isinstance(servers.get(key), dict):
+        return False
+    from . import history as _h
+    return _h.approved({"servers": servers}, key) is not None
 
 
 
@@ -515,7 +593,7 @@ def policy_rows(d: dict[str, Any]) -> list[tuple[str, str, str, str]]:
     asserted: a control that is off says off, and no row is ever a percentage.
     """
     from . import history as _h
-    store = d.get("store") if isinstance(d.get("store"), dict) else {"servers": {}}
+    store = _dict_at(d, "store", {"servers": {}})
     agents = _agent_rows(d)
     covered = sum(1 for _k, _l, st, _n, _det in agents if st == "on")
     pending = len(d.get("pending") or [])
@@ -554,12 +632,12 @@ def policy_rows(d: dict[str, Any]) -> list[tuple[str, str, str, str]]:
     rows.append(("Detect and respond to change",
                  "drift is itemised per tool and blocks the server until a person decides; "
                  "verify reproduces behaviour in a sandbox",
-                 f"{len(moved)} server(s) first seen changed in the last 7 days · {pending} awaiting a "
+                 f"{len(moved)} server(s) moved off their baseline in the last 7 days · {pending} awaiting a "
                  f"decision · last verify "
                  f"{_local_stamp(d.get('verify_at')) if d.get('verify_at') else 'never'}",
                  "warn" if pending else "ok"))
     # 5
-    act = d.get("activity") if isinstance(d.get("activity"), dict) else {}
+    act = _dict_at(d, "activity")
     calls = act.get("calls") or 0
     audit = bool(gw.get("audit_present"))
     rows.append(("Audit everything",
@@ -953,11 +1031,13 @@ def agent_server_tree(d: dict[str, Any], rows: list[dict] | None = None) -> list
         except Exception:                          # noqa: BLE001 - a fleet view must still render
             pass
 
+    appeared = d.get("appeared") or {}
+
     def _pair(agent: str, server: str) -> dict:
         return pairs.setdefault((agent, server), {
             "agent": agent, "server": server, "calls": 0, "denied": 0,
             "last": None, "declared": False, "observed": False,
-            "needs_signin": server in signin})
+            "needs_signin": server in signin, "appeared": server in appeared})
 
     for name, entry in entries.items():
         if not isinstance(entry, dict):
@@ -1017,11 +1097,9 @@ _TW = {"agent_w": 272, "srv_w": 300, "tool_w": 260, "call_w": 320, "h": 46,
        "pitch": 54, "gap": 44, "pad": 10}
 
 
-def _clip(text: str, n: int) -> str:
-    """SVG text does not wrap. A label that overruns its box would draw straight across the
-    connectors, so it is cut here rather than left to overlap the drawing."""
-    text = str(text)
-    return text if len(text) <= n else text[: n - 1] + "\u2026"
+# `_clip` (defined further down) also bounds the SVG labels here: SVG text does not wrap, so a label
+# that overruns its box would draw across the connectors. A second, character-cut `_clip` used to sit
+# here; the later definition replaced it at import, so it never ran (mypy no-redef, 2026-09-25).
 
 
 def _wrap(text: str, width: int, lines: int) -> list[str]:
@@ -1046,7 +1124,7 @@ def _wrap(text: str, width: int, lines: int) -> list[str]:
     return out
 
 
-def _tnode(x: int, y: int, w: int, title: str, meta: list[str], href: str, *,
+def _tnode(x: int, y: int, w: int, title: str, meta: list[str], href: str | None, *,
            accent: bool = False, alarm: bool = False, aria: str = "") -> str:
     """One box. A link, so the whole node is the target — the drill-down is a GET and a
     re-render, which is what keeps this drawing script-free under the panel's CSP.
@@ -1064,8 +1142,12 @@ def _tnode(x: int, y: int, w: int, title: str, meta: list[str], href: str, *,
     cap = int((w - 24) / 6.6)
     mt = "".join(f'<text class="tnm" x="{x + 12}" y="{y + 30 + i * 12}">{_esc(_clip(m, cap))}</text>'
                  for i, m in enumerate(lines))
-    return (f'<a href="{_esc_attr(href)}" class="{cls}">{label}'
-            f'<rect x="{x}" y="{y}" width="{w}" height="{_TW["h"]}" rx="9"/>{tt}{mt}</a>')
+    body = f'<rect x="{x}" y="{y}" width="{w}" height="{_TW["h"]}" rx="9"/>{tt}{mt}'
+    if href is None:
+        # NOTHING TO OPEN, SO NOT A LINK. A box that navigates to a target no view answers is a
+        # control that does nothing; the drawing still says what it says.
+        return f'<g class="{cls} tnx">{label}{body}</g>'
+    return f'<a href="{_esc_attr(href)}" class="{cls}">{label}{body}</a>'
 
 
 def _elbow(x1: int, y1: int, x2: int, y2: int) -> str:
@@ -1158,7 +1240,7 @@ def _surface_nodes(server: str, surfaces: dict | None, surfurl, x: int, y: int, 
     if surf.get("decisions"):
         n = surf["decisions"]
         items.append((f'{n} decision{"" if n == 1 else "s"} waiting',
-                      ["changed since you approved it", "open the Decisions tab"],
+                      ["changed since its baseline", "open the Decisions tab"],
                       surfurl("decisions"), False))
     if surf.get("evidence"):
         items.append(("evidence", ["the verify run behind these numbers", "open the Evidence tab"],
@@ -1174,7 +1256,8 @@ def _surface_nodes(server: str, surfaces: dict | None, surfurl, x: int, y: int, 
 def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | None = None,
                       agurl=None, open_server: str | None = None, srvurl=None,
                       rows: list[dict] | None = None, open_tool: str | None = None,
-                      toolurl=None, surfaces: dict | None = None, surfurl=None) -> str:
+                      toolurl=None, surfaces: dict | None = None, surfurl=None,
+                      known: set[str] | None = None) -> str:
     """The fleet drawn as a tree: agents, the servers each can reach, and that pair's tools.
 
     [FOUNDER 2026-08-26] "when i say it to be a branch in a tree i meant like this" — a drawn
@@ -1236,7 +1319,11 @@ def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | Non
         cursor = ay
         for pair in node["servers"]:
             sy = cursor
-            if pair["needs_signin"]:
+            if pair.get("appeared"):
+                # Before "configured, never used": that read as dormant surface, and this is a
+                # server nobody approved (walk, 2026-10-05).
+                state = "appeared — not trusted"
+            elif pair["needs_signin"]:
                 state = "needs sign-in"
             elif pair["declared"] and pair["observed"]:
                 state = ""
@@ -1263,10 +1350,16 @@ def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | Non
             # TWO TARGETS ON ONE ROW, because they are two different questions. The box opens the
             # branch; this opens the server's own detail drawer. Making the box do both would have
             # cost the drawer its only route in from the fleet.
-            parts.append(
-                f'<a href="{_esc_attr(rowurl(pair["server"]))}" class="tdet">'
-                f'<title>{_esc(pair["server"])} — open the server detail</title>'
-                f'<text x="{sx + sw - 12}" y="{sy + 30}" text-anchor="end">detail ›</text></a>')
+            # ONLY WHERE A DRAWER EXISTS. A pair known only from call rows ("used, not in this
+            # config") has no server record, so `sel=` for it opened nothing (2026-10-05). The
+            # tree itself is the whole record of such a pair; every link to the drawer is dropped.
+            detail_url = (rowurl(pair["server"])
+                          if known is None or pair["server"] in known else None)
+            if detail_url is not None:
+                parts.append(
+                    f'<a href="{_esc_attr(detail_url)}" class="tdet">'
+                    f'<title>{_esc(pair["server"])} — open the server detail</title>'
+                    f'<text x="{sx + sw - 12}" y="{sy + 30}" text-anchor="end">detail ›</text></a>')
 
             if not srv_open:
                 cursor = sy + pitch
@@ -1320,7 +1413,7 @@ def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | Non
                     parts.append(_elbow(tx + tw, ty + _TW["h"] // 2, cx, cy + _TW["h"] // 2))
                     parts.append(_tnode(cx, cy, cw, head,
                                         _wrap(why, int((cw - 24) / 6.6), 2) if why else ["", ""],
-                                        rowurl(pair["server"]),
+                                        detail_url,
                                         alarm=c["decision"] == "deny",
                                         aria=(f'{c["decision"]} at {c["ts"]}, basis {c["basis"]}'
                                               + (f' — {why}' if why else ""))))
@@ -1328,7 +1421,7 @@ def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | Non
                 if chid:
                     parts.append(_tnode(cx, ty + len(calls) * pitch, cw,
                                         f'+{chid} more ruling{"" if chid == 1 else "s"}',
-                                        ["older than the eight shown", ""], rowurl(pair["server"]),
+                                        ["older than the eight shown", ""], detail_url,
                                         aria=f'{chid} further rulings, not drawn'))
                 tcursor = ty + max(1, len(calls) + (1 if chid else 0)) * pitch
             widest = max(widest, tx + tw)
@@ -1336,7 +1429,7 @@ def render_fleet_tree(tree: list[dict], rowurl, window: int, expanded: str | Non
                 # NO SILENT CAP. A list cut at ten reads as the complete set, and this view's
                 # whole claim is that it shows what an agent can reach.
                 parts.append(_tnode(tx, tcursor, tw, f'+{hidden} more tool{"" if hidden == 1 else "s"}',
-                                    ["quieter than the ten shown", ""], rowurl(pair["server"]),
+                                    ["quieter than the ten shown", ""], detail_url,
                                     aria=f'{hidden} further tools, not drawn — open the server'))
                 tcursor += pitch
             snodes, tcursor = _surface_nodes(pair["server"], surfaces, surfurl,
@@ -1605,7 +1698,6 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
     every stage is listed always, and an unreached one says what would make it real rather than
     rendering as a blank. The strip disappears only when every stage is done.
     """
-    from . import history as _h
 
     entries = d.get("entries") or {}
     store = (d.get("store") or {}).get("servers") or {}
@@ -1615,7 +1707,14 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
     live = gw.get("live") or {}
     rows = _agent_rows(d)
     protected = sum(1 for _, _, st, _, _ in rows if st == "on")
-    approved = sum(1 for k in store if _h.approved({"servers": store}, k))
+    # The rule `status` and the bare run count by: approved AND not pending. Counting every
+    # approved record said "1 at an approved baseline" during drift, beside their 0 (2026-10-05).
+    from .protect import at_approved_baseline
+    # The WHOLE store, not `{"servers": store}`: the origin rule reads the fleet record too, and
+    # a fleet-approved baseline wrapped without it reads as a first sighting (one-rule test).
+    _whole_store = d.get("store") or {"servers": store}
+    _covered = at_approved_baseline(_whole_store, d.get("pending") or [])
+    approved = len(_covered)
     clients = sorted({c for e in entries.values() if isinstance(e, dict)
                       for c in (e.get("_clients") or [])})
     signins = signin_asks(entries)      # ONE source — the briefing strip reads the same list
@@ -1679,7 +1778,11 @@ def journey_steps(d: dict[str, Any]) -> list[dict[str, Any]]:
     # Approvals are the free-tier spine and belong in the fact line of 'see', not a stage of
     # their own — the founder's flow is fleet → trust → gateway, not a checklist of features.
     if approved:
-        steps[0]["fact"] += f" · {approved} at an approved baseline"
+        # The words follow the records' origins (history's one rule): "approved" only when a
+        # person stands behind every one. Said "at an approved baseline" of first sightings
+        # (walk, 2026-10-09), beside /next's "nobody has approved this server yet".
+        from .history import at_baseline_words_for as _abw
+        steps[0]["fact"] += f" · {approved} {_abw(_whole_store, _covered)}"
     if calls:
         # SEEN, not "checked" — same defect as the Activity headline, second surface. `calls` here
         # is the raw recent-call list; whether the guard actually checked any of them is a
@@ -1705,8 +1808,16 @@ def next_best_action(d: dict[str, Any]) -> tuple[str, str]:
         # a user reading it reaches for the Blocked filter and finds nothing — those servers carry
         # the "Changed" tier. Saying both words is what closes the gap between the alarm and the
         # place the alarm's subject can be found.
-        return (f"{pending} server(s) changed since you approved them — your agents cannot call "
+        # "since you approved them" only when a person approved every one (history's one rule).
+        from .history import changed_since
+        since = changed_since(d.get("store") or {}, list(d.get("pending") or []), plural=True)
+        return (f"{pending} server(s) changed {since} — your agents cannot call "
                 f"them right now. Open Decisions, or filter Servers by Changed.", "bad")
+    appeared = d.get("appeared") or {}
+    if appeared:
+        return (f"{len(appeared)} server(s) appeared in an agent config since your fleet approval "
+                f"— named, not trusted: {', '.join(sorted(appeared))}. Review, then "
+                f"`mcpgawk approve <name>`.", "warn")
     findings = [f for f in (d.get("findings") or [])
                 if not muted_by_you(f) and not f.get("first_party")]
     # Low-severity config findings (unpinned versions, install scripts) must not hijack the next
@@ -1832,6 +1943,139 @@ def _banner_is_stale(action: dict | None, max_age_s: int = _BANNER_MAX_AGE_S) ->
     return (datetime.now(timezone.utc) - when).total_seconds() > max_age_s
 
 
+def _calls_chart(series: list[dict]) -> str:
+    """Calls per day as stacked bars — checked and allowed (green), blocked (red), NOT checked (amber).
+
+    FOUNDER 2026-09-28, adopting Opik's volume chart: "very importantly the chart or graph". The series
+    comes from spool.calls_by_day, which uses summarise's rule, so the bars always add up to the
+    headline beside them. Inline SVG (the panel's CSP allows no script); every segment carries its own
+    count in a <title>, and the figure a sentence for screen readers. No calls in the window says so
+    in words — an empty grid must never read as "all clear"."""
+    if not series:
+        return ""
+    tot = {k: sum(d[k] for d in series) for k in ("allowed", "blocked", "not_checked", "total")}
+    first, last = series[0]["day"], series[-1]["day"]
+    if not tot["total"]:
+        return (f'<div class="cchart empty">No MCP calls recorded from {_esc(first)} to {_esc(last)} — '
+                f'nothing checked and nothing blocked, because nothing was seen.</div>')
+    peak = max(d["total"] for d in series)
+    step = next(s for s in (1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000, 10000, 10**9)
+                if peak / s <= 4)
+    top = step * -(-peak // step)
+    W, H, L, B, T = 720, 200, 40, 26, 10
+    pw, ph = W - L - 6, H - B - T
+    slot = pw / len(series)
+    bw = min(slot * 0.62, 36)
+    def y(v):
+        return T + ph - v / top * ph
+    parts = []
+    for g in range(0, top + 1, step):
+        parts.append(f'<line class="grid" x1="{L}" y1="{y(g):.1f}" x2="{W - 6}" y2="{y(g):.1f}"></line>'
+                     f'<text class="ax" x="{L - 6}" y="{y(g) + 4:.1f}" text-anchor="end">{g}</text>')
+    for i, d in enumerate(series):
+        x = L + i * slot + (slot - bw) / 2
+        base = 0
+        for key, cls, word in (("allowed", "ok", "checked and allowed"), ("blocked", "bad", "blocked"),
+                               ("not_checked", "warn", "not checked")):
+            v = d[key]
+            if v:
+                parts.append(f'<rect class="{cls}" x="{x:.1f}" y="{y(base + v):.1f}" width="{bw:.1f}" '
+                             f'height="{y(base) - y(base + v):.1f}" rx="2"><title>{_esc(d["day"])}: {v} {word}'
+                             f'</title></rect>')
+                base += v
+        parts.append(f'<text class="ax" x="{x + bw / 2:.1f}" y="{H - B + 16}" text-anchor="middle">'
+                     f'{_esc(d["day"][8:10])}</text>')
+    label = (f'Calls per day, {first} to {last}: {tot["allowed"]} checked and allowed, {tot["blocked"]} blocked, '
+             f'{tot["not_checked"]} not checked.')
+    return (f'<figure class="cchart"><svg viewBox="0 0 {W} {H}" role="img" aria-label="{_esc(label)}">'
+            + "".join(parts) + '</svg><figcaption>'
+            f'<span><i class="ok"></i>Checked and allowed ({tot["allowed"]:,})</span>'
+            f'<span><i class="bad"></i>Blocked ({tot["blocked"]:,})</span>'
+            f'<span><i class="warn"></i>Not checked — no baseline ({tot["not_checked"]:,})</span>'
+            f'<span class="dim">{_esc(first)} → {_esc(last)}, per UTC day</span></figcaption></figure>')
+
+
+def uncovered_remedy(name: str, d: dict[str, Any]) -> str:
+    """What the person can do about calls to `name` that the guard could not check — from the
+    server's STATE, in order, never from a name mapping. The spool names claude-in-chrome one
+    way and native-host discovery names it another, so the "browser host" branch never matched
+    and 3,216 calls were told "run a scan to cover them" right after a scan said that host
+    cannot be scanned (2026-10-09). The same else-branch sent a pending server to a scan when
+    it needed a decision, and a signed-out one when it needed a sign-in."""
+    store = d.get("store") or {}
+    servers = store.get("servers") or {}
+    keys = [k for k, e in servers.items()
+            if k == name or name in ((e or {}).get("aliases") or [])]
+    if any(k in set(d.get("pending") or []) for k in keys):
+        return "waiting on your decision — approve it or keep it blocked"
+    try:
+        from . import remote_login as _rl
+        needs = _rl.auth_needed()
+    except Exception:                              # noqa: BLE001 — a note is never a blocker
+        needs = {}
+    if name in needs:
+        return "waiting on your sign-in — its tools cannot be measured until then"
+    if name in (d.get("entries") or {}) or keys:
+        return "run a scan to cover them"
+    return ("not an MCP server entry on this machine (a browser capability, or a server since "
+            "removed) — no scan can baseline it")
+
+
+def _today_tiles(series: list[dict], unscannable: object, changed: int = 0,
+                 since: str = "since their baseline", remedy: Any = None) -> str:
+    """Today's at-a-glance tiles (FOUNDER 2026-09-28, adopting Opik's Insights tiles).
+
+    The chart's own series and window, so tiles, chart and Activity headline agree. Colour only for
+    status and only when non-zero. "Not checked" carries its remedy split the way the Activity
+    headline splits it: a browser host no scan can baseline is never told to "run a scan"."""
+    if not series:
+        return ""
+    tot = {k: sum(d[k] for d in series) for k in ("total", "checked", "blocked", "not_checked")}
+    unsc = {str(u.get("name")) for u in (unscannable or []) if isinstance(u, dict)}
+    by_server: dict[str, int] = {}
+    if tot["not_checked"]:
+        from . import spool as _sp
+        first = series[0]["day"]
+        for r in _sp.read(limit=200_000):
+            if r.get("decision") == "defer" and str(r.get("ts") or "")[:10] >= first:
+                k = str(r.get("server") or "?")
+                by_server[k] = by_server.get(k, 0) + 1
+    notes = []
+    for name, n in sorted(by_server.items(), key=lambda kv: -kv[1])[:3]:
+        why = ("a browser host no scan can baseline" if name in unsc
+               else remedy(name) if remedy else "run a scan to cover them")
+        notes.append(f"{n:,} to {_esc(name)} — {why}")
+
+    def tile(label: str, value: int, cls: str = "", note: str = "", wide: bool = False) -> str:
+        c = (f" {cls}" if cls and value else "") + (" wide" if wide else "")
+        n = f'<div class="tn">{note}</div>' if note else ""
+        return f'<div class="tile{c}"><div class="tl">{label}</div><div class="tv">{value:,}</div>{n}</div>'
+
+    pct = f"{tot['checked'] / tot['total']:.0%} of calls" if tot["total"] else ""
+    return ('<div class="ttiles">'
+            + tile("Calls seen", tot["total"], note="last 14 days")
+            + tile("Checked against your baseline", tot["checked"], "ok", pct)
+            + tile("Not checked", tot["not_checked"], "warn", " · ".join(notes), wide=bool(notes))
+            + tile("Blocked", tot["blocked"], "bad")
+            # `since` comes from the one origin rule (history.since_words): "since you approved
+            # them" only when a person approved every pending baseline (2026-10-09: this label
+            # said "you approved" over two first-sighting fallbacks).
+            + tile(f"Changed {since}", changed, "bad")
+            + '</div>')
+
+
+def _summary_from_series(series: list[dict], summary: dict | None = None) -> dict:
+    """The headline's numbers from the chart's own series: seen = total, checked = allow + deny,
+    deferred = not checked. Empty series → the summary as given (nothing to disagree with)."""
+    if not series:
+        return dict(summary or {})
+    out = dict(summary or {})
+    out["calls"] = sum(int(d.get("total") or 0) for d in series)
+    out["checked"] = sum(int(d.get("checked") or 0) for d in series)
+    out["deferred"] = sum(int(d.get("not_checked") or 0) for d in series)
+    return out
+
+
 def _activity_headline(summary: object) -> str:
     """seen / checked / DECLINED — never a single number labelled "checked".
 
@@ -1857,7 +2101,7 @@ def _activity_headline(summary: object) -> str:
         # Written before the distinction existed: say so rather than infer a number.
         return (f"<b>{seen}</b> calls seen · <span class=\"warn\">how many were CHECKED is not "
                 f"recorded in this log</span>")
-    out = f"<b>{seen}</b> seen · <b>{checked}</b> checked against an approved baseline"
+    out = f"<b>{seen}</b> seen · <b>{checked}</b> checked against a baseline"
     if deferred:
         unsc = summary.get("deferred_unscannable") or 0
         scannable = max(deferred - unsc, 0)
@@ -2102,7 +2346,7 @@ _TAB_BLURBS = {
     "n0": "every server your agents can reach, and its state",
     "n6": "what verification caught a server doing",
     "n4": "every call an agent made, and the guard’s decision",
-    "n3": "servers that changed after you approved them",
+    "n3": "servers that changed since their baseline",
     "n1": "which agents carry the pre‑execution hook",
     "n7": "one endpoint in front of the fleet, a key per agent",
     "n8": "watches running servers for drift between scans",
@@ -2171,7 +2415,10 @@ API_ALLOWED = ("errors", "discovery_problems", "unscannable", "pending", "activi
                # consumer cannot read observation as reproduction by accident.
                "wrap_observed",
                # which file each client's fleet was read from: client, path, status — no values
-               "sources")
+               "sources",
+               # servers in an agent config since the fleet approval: name -> [client/name,
+               # target] (targets are masked as history.json stores them), and that approval's date
+               "appeared", "appeared_since")
 #: Present in `collect()`, deliberately NOT in the API as-is: the two wide call windows are
 #: thousands of rows (a consumer wants the agent→server tree, served as `tree` instead); `entries`
 #: and `store` are PROJECTED below rather than copied.
@@ -2215,7 +2462,8 @@ def _api_store(store: dict, d: dict | None = None) -> dict:
         if not isinstance(se, dict):
             continue
         approved = se.get("approved") if isinstance(se.get("approved"), dict) else None
-        hist = se.get("history") if isinstance(se.get("history"), list) else []
+        _hist = se.get("history")
+        hist = _hist if isinstance(_hist, list) else []
         last = hist[-1] if hist and isinstance(hist[-1], dict) else None
         def _surface(rec):
             if not rec:
@@ -2315,6 +2563,15 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     since last week" badge on three findings is not information.
     """
     from . import history as _h
+
+    def _origin_of(keys: "list[str]") -> "list[str | None]":
+        """Each key's baseline origin — history's one rule — for the "since you approved" words."""
+        return [_h.baseline_origin(store, k) for k in keys]
+
+    def _since_approval(k: str) -> str:
+        """A Today row's "changed since …": "approval" only when a person approved the baseline."""
+        return ("since approval" if _h.vouched(_origin_of([k]))
+                else _h.since_words(_origin_of([k])))
 
     # NB there is deliberately no `entries` local any more. The row counter was its last consumer,
     # and it was the wrong source for it (see the note at the counter): discovery-only, while the
@@ -2445,7 +2702,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # The row follows the approved mockup's table grammar (LiteLLM's, per DESIGN.md): icon square +
     # bold name over grey mono id, transport as an outline tag, right-aligned numerics, and the
     # tier as a fully-rounded tinted tag in the shape of their Healthy / Degraded column.
-    _tag = {"blocked": "bad", "findings": "bad", "changed": "warn",
+    _tag = {"blocked": "bad", "appeared": "warn", "findings": "bad", "changed": "warn",
             "unverified": "unv", "observed": "obs", "baseline": "ok"}
     _tlabel = {t: lbl for t, lbl, _ in TIERS}
     #: name -> how many tools this server DECLARES destructive; feeds the first-run story with a
@@ -2524,14 +2781,21 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     fleet_tree = render_fleet_tree(agent_server_tree(d), _rowurl, len(_fleet_rows),
                                    expanded=ag, agurl=_agurl, open_server=br, srvurl=_srvurl,
                                    rows=_fleet_rows, open_tool=tc, toolurl=_toolurl,
-                                   surfaces=_surfaces, surfurl=_surfurl)
+                                   surfaces=_surfaces, surfurl=_surfurl,
+                                   known={n for n, _e, _k, _t in classified})
 
     sel_active = bool(sel) and any(n == sel for n, _, _, _ in classified)
     drawer = ""
-    srows = []
+    srows: list[str] = []
     #: Baseline-only servers render grouped under ONE band that states their shared fact once,
     #: instead of repeating it in every row's cells (panel UX pass, 24 Aug).
     bo_rows: list[str] = []
+    #: Held sightings whose config entry has gone. NOT under the baseline-only band: that band says
+    #: "Approved", and nobody approved these. Kept visible rather than dropped — the record is still
+    #: in the store, `approve` would still adopt it, and the scan and status still name it — so
+    #: they get their own band stating what is true of them (follow-up walk, 2026-10-05).
+    hg_rows: list[str] = []
+    _held_keys = set(_h.held(store)) if isinstance(store, dict) else set()
     #: Servers whose ONLY blocker is a browser sign-in — the one ask a machine cannot do for the
     #: operator, so the briefing strip names them (founder, 24 Aug: "the only time it should ask
     #: me is when a server needs authentication").
@@ -2845,7 +3109,8 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             watched_s = (f'<span class="wt" title="{checked} of {tools} tools watched by a '
                          f'verify run">{checked}/{tools} watched</span>'
                          if checked and isinstance(tools, int) and checked < tools else '')
-            (bo_rows if _baseline_only else srows).append(f"""<div class="row{' sel' if _is_sel else ''}">
+            (hg_rows if (_baseline_only and key in _held_keys)
+             else bo_rows if _baseline_only else srows).append(f"""<div class="row{' sel' if _is_sel else ''}">
   {who}
   <span><span class="chip mode">{local}</span></span>
   <span class="dim cl-agents">{_agents_cell}</span>
@@ -2855,10 +3120,13 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
   {act_cell or '<span></span>'}
 </div>""")
 
-    _shown = len(srows) + len(bo_rows)             # the filter count counts ROWS, never the band
+    _shown = len(srows) + len(bo_rows) + len(hg_rows)   # the filter count counts ROWS, never a band
     _band = (f'<div class="grpband">Approved but in no agent’s config ({len(bo_rows)}) '
              f'— nothing can call these right now</div>' if bo_rows else '')
-    _rows_html = ("".join(srows) + _band + "".join(bo_rows)) or (
+    _hg_band = (f'<div class="grpband">Appeared, then removed from every config — never approved '
+                f'({len(hg_rows)})</div>' if hg_rows else '')
+    _rows_html = ("".join(srows) + _hg_band + "".join(hg_rows) + _band
+                  + "".join(bo_rows)) or (
         '<div class="note" style="margin-top:13px">Nothing matches. '
         f'<a href="/?t={_esc(token)}">Clear the filter.</a></div>')
     servers_table = (
@@ -2910,9 +3178,13 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     from .history import changed_within as _changed_within
     _moved_7d = _changed_within(store, days=7) if isinstance(store, dict) else []
     if _moved_7d:
+        # "first seen changed in 7d" collided with "first seen", the product's own term for a
+        # sighting baseline (2026-10-09). Say what it counts and how it differs from Changed.
         _radar += (f'<a class="chip warn bchip" href="{_tierurl("changed")}" title="'
+                   f'moved off their approved pin in the last 7 days, pending or since approved '
+                   f'(Changed counts only what is still pending): '
                    f'{_esc(", ".join(_h.display_name(store, k) for k, _ in _moved_7d[:8]))}">'
-                   f'<i></i>{len(_moved_7d)} first seen changed in 7d</a>')
+                   f'<i></i>{len(_moved_7d)} changed this week</a>')
     _asks = []
     if _auth_asks:
         _who = ", ".join(_esc(n) for n in _auth_asks[:2]) + \
@@ -2927,7 +3199,12 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # alone. Measured 2026-09-18 on a real fleet: /next said "13 need you" while this screen
     # said "All quiet." over its own red row reading "1 finding to review". The queue is the
     # single source; terminals are excluded here exactly as /next excludes them.
-    _queue_live = [it for it in next_queue(d) if not it.get("terminal")]
+    _queue_all = next_queue(d)
+    _queue_live = [it for it in _queue_all if not it.get("terminal")]
+    # The items the queue holds but nobody here can finish (a vendor's wall, a server set
+    # aside): said beside the count, as /next says it, so "11 things need you" is not read
+    # over cards that say "not yours to finish" (2026-10-09).
+    _queue_term = len(_queue_all) - len(_queue_live)
     _queue_rest = len(_queue_live) - len(_auth_asks) - (1 if pending else 0)
     if _queue_rest > 0:
         # "MORE" ONLY WHEN THERE IS SOMETHING TO BE MORE THAN. On a fleet with no sign-in and no
@@ -2962,8 +3239,13 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     # not alarm) rebuilt one pill along. The count stays whole; the ink is reserved.
     _asks_alarm = queue_alarms(_queue_live)
     _t_head = (f"{_asks_n} thing{'s' if _asks_n != 1 else ''} need"
-               f"{'' if _asks_n != 1 else 's'} you." if _asks_n else "All quiet.")
+               f"{'' if _asks_n != 1 else 's'} you." if _asks_n
+               # Never calm while a server nobody approved is in an agent config — even one whose
+               # identity already had a baseline, which no queue kind counts.
+               else (f"{len(d.get('appeared') or {})} server(s) appeared — named, not trusted."
+                     if d.get("appeared") else "All quiet."))
     _cards = []
+    _calm_cards: list[str] = []      # real, visible, and NOT the to-do list: rendered after it
     for _n in _auth_asks[:3]:
         _act = (f'<form method="POST" action="/" class="rowact">'
                 f'<input type="hidden" name="token" value="{_esc(token)}">'
@@ -3000,30 +3282,42 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         _vendors = sorted({(_signin_by_name.get(n) or {}).get("vendor") or "their vendor"
                            for n in _walled})
         _bw = ", ".join(_vendors)
-        _cards.append(f'<div class="ask calm">{len(_walled)} server(s) cannot be signed into '
+        _calm_cards.append(f'<div class="ask calm">{len(_walled)} server(s) cannot be signed into '
                       f'from here — {_esc(", ".join(_walled))}: {_esc(_bw)} '
                       f'{"do" if len(_vendors) > 1 else "does"} not let mcpgawk sign in yet. '
                       f'Not yours to finish — <a href="{_tierurl("signin")}">show them in the '
                       f'fleet</a></div>')
     if _aside:
-        _cards.append(f'<div class="ask calm"><span>{len(_aside)} server(s) set aside by you — '
+        _calm_cards.append(f'<div class="ask calm"><span>{len(_aside)} server(s) set aside by you — '
                       f'{_esc(", ".join(_aside))}: you recorded that {"they are" if len(_aside) > 1 else "it is"} '
                       f'not available to you, so mcpgawk stops asking. Still listed, and you can '
                       f'put {"them" if len(_aside) > 1 else "it"} back — '
                       f'<a href="{_tierurl("signin")}">show {"them" if len(_aside) > 1 else "it"} in '
                       f'the fleet</a></span></div>')
+    _appeared_d = d.get("appeared") or {}
+    if _appeared_d:
+        _app_names = sorted(_appeared_d)
+        _cards.append(f'<div class="ask"><span class="ak">trust decision — only you should</span>'
+                      f'<h5>{len(_app_names)} server{"s" if len(_app_names) != 1 else ""} '
+                      f'appeared since your fleet approval</h5>'
+                      f'<p>{_esc(", ".join(_app_names))} — named, not trusted. Nothing you approved '
+                      f'checks {"their" if len(_app_names) != 1 else "its"} calls. Review, then '
+                      f'<code>mcpgawk approve &lt;name&gt;</code>.</p></div>')
     if pending:
         _cards.append(f'<div class="ask"><span class="ak">trust decision — only you should</span>'
-                      f'<h5>{len(pending)} server{"s" if len(pending) != 1 else ""} changed after '
-                      f'you approved {"them" if len(pending) != 1 else "it"}</h5>'
-                      f'<p>Blocked meanwhile — the rug-pull shape is exactly this.</p>'
-                      f'<label class="act-btn albl" for="n3">Review &amp; decide</label></div>')
+                      f'<h5>{len(pending)} server{"s" if len(pending) != 1 else ""} changed '
+                      + (f'after you approved {"them" if len(pending) != 1 else "it"}'
+                         if _h.vouched(_origin_of(pending)) else
+                         _h.since_words(_origin_of(pending))) + '</h5>'
+                      '<p>Blocked meanwhile — the rug-pull shape is exactly this.</p>'
+                      '<label class="act-btn albl" for="n3">Review &amp; decide</label></div>')
     # THE SAME CONTRADICTION, ONE ELEMENT DOWN. These cards are built from sign-ins and pending
     # approvals alone, so their empty state used to say "Nothing needs you — sign-ins and trust
     # decisions are the only things that ever will" — the claim 05f6935 removed from the line
     # above it, still being made here. Found in the browser walk on a fleet of two unmeasured
     # servers: "3 things need you." with "Nothing needs you" directly underneath. An empty CARD
     # deck is not an empty QUEUE, and only the queue may say nothing needs you.
+    _cards += _calm_cards            # the uncounted, under the counted
     if _cards:
         _asks_html = "".join(_cards)
     elif _queue_live:
@@ -3034,20 +3328,22 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                       '</span></div>')
     else:
         _asks_html = '<div class="ask calm">Nothing needs you — the queue is empty.</div>'
-    _PROBLEM = {"blocked", "findings", "changed"}
+    _PROBLEM = {"blocked", "appeared", "findings", "changed"}
+    _app_why = (f"appeared after your fleet approval on {d.get('appeared_since') or 'an earlier date'}"
+                f" — named, not trusted")
     _trows = []
     for _n2, _e2, _k2, _t2 in classified:
         _is_auth = _n2 in _auth_all
         _st2 = _signin_by_name.get(_n2) or {}
         if _t2 not in _PROBLEM and not _is_auth:
             continue
-        if _t2 == "blocked" and _e2.get("_baseline_only"):
+        if _t2 == "blocked" and _e2.get("_baseline_only") and _k2 not in _held_keys:
             continue                                   # folded to one group line below
         # THE PROBLEM KEEPS ITS NAME. A sign-in is an ask, not a state: kite (findings) and
         # Revolut X (measured, at baseline) both rendered as "waiting on your browser sign-in"
         # here, hiding the finding and contradicting the Servers table one click away.
         if _t2 == "changed":
-            _why2 = "changed since approval — blocked until you decide"
+            _why2 = f"changed {_since_approval(_k2)} — blocked until you decide"
             # A changed server with findings says BOTH: the reorder that made the counts agree
             # must not hide the conviction ("a server we convicted is not at its baseline").
             _nf2 = _f_by_srv.get(_n2, 0)
@@ -3057,8 +3353,30 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             _nf = _f_by_srv.get(_n2, 0)
             _why2 = (f"{_nf} finding{'s' if _nf != 1 else ''} to review" if _nf
                      else "has findings on record")
+        elif _t2 == "appeared":
+            _why2 = (f"{_HELD_GONE} — its sighting is kept" if _e2.get("_baseline_only")
+                     else _app_why)
+            # APPEARED OUTRANKS CHANGED (the pinned order), but the drift is still pending: the
+            # tile, the ask card and the strip all count it. A row saying only "appeared" left
+            # Today counting one changed server and naming none (2026-10-05).
+            if _k2 and _k2 in (pending or []):
+                _why2 += f" · also changed {_since_approval(_k2)} — blocked until you decide"
+            _nf2 = _f_by_srv.get(_n2, 0)
+            if _nf2:
+                _why2 += f" · {_nf2} finding{'s' if _nf2 != 1 else ''} to review"
         elif _t2 == "blocked":
-            _why2 = "blocked"
+            # A strict-mode deny of an appeared server is BOTH; the reason it was refused is that
+            # nobody approved it, so the row must not shrink to a bare "blocked".
+            _why2 = (f"{_app_why} · a call was denied" if _n2 in _appeared_d
+                     else "a call was denied")
+            # BLOCKED OUTRANKS CHANGED too, and the drift is just as pending: the same suffixes
+            # as the appeared branch, or Today counts a changed server it never names
+            # (2026-10-05). "a call was denied", not "blocked": the chip already says Blocked.
+            if _k2 and _k2 in (pending or []):
+                _why2 += f" · also changed {_since_approval(_k2)} — blocked until you decide"
+            _nf2 = _f_by_srv.get(_n2, 0)
+            if _nf2:
+                _why2 += f" · {_nf2} finding{'s' if _nf2 != 1 else ''} to review"
         else:
             _why2 = _st2.get("row") or "waiting on your browser sign-in"
             if _st2.get("state") == "blocked_vendor" and _st2.get("vendor"):
@@ -3080,8 +3398,14 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             f'<td class="tact"><a href="{_rowurl(_n2).replace("tab=n0", "tab=n0")}">open</a></td></tr>')
     # Every remembered-only record, whatever tier it would sort into — four of them read as
     # "unverified (4)" on Today while the headline called them "remembered, configured nowhere".
-    _bo_n = sum(1 for _n2, _e2, _k2, _t2 in classified if _e2.get("_baseline_only"))
-    _quiet_unv = counts.get("unverified", 0) - len(_auth_asks)
+    _bo_n = sum(1 for _n2, _e2, _k2, _t2 in classified
+                if _e2.get("_baseline_only") and _k2 not in _held_keys)
+    # Subtract EVERY sign-in-state server that already has its own row above, not just the
+    # actionable one: the vendor-blocked and set-aside rows were also inside "unverified (N)",
+    # so the list said 5 where the chip said 6 and the page summed to 21 rows for 17 servers
+    # (2026-10-09). One server, one row or one group.
+    _quiet_unv = counts.get("unverified", 0) - sum(
+        1 for _n3, _e3, _k3, _t3 in classified if _n3 in _auth_all and _t3 == "unverified")
     _grp_lines = ""
     if _bo_n:
         _bo_url = "/?" + "&".join(([f"t={_urlq(token)}"] if token else []) + ["tab=n0"])
@@ -3091,9 +3415,19 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
     if _quiet_unv > 0:
         _grp_lines += (f'<tr class="tgrp"><td colspan="5">unverified ({_quiet_unv}) '
                        f'<a href="{_tierurl("unverified")}">show</a></td></tr>')
+    if counts.get("observed"):
+        # The tier had a chip and no line: two observed servers vanished from the list.
+        _grp_lines += (f'<tr class="tgrp"><td colspan="5">observed in your client\'s traffic, not '
+                       f'verified ({counts["observed"]}) <a href="{_tierurl("observed")}">show</a></td></tr>')
     if counts.get("baseline"):
-        _grp_lines += (f'<tr class="tgrp"><td colspan="5">at baseline, quiet '
+        _grp_lines += (f'<tr class="tgrp"><td colspan="5">verified, quiet '
                        f'({counts["baseline"]}) <a href="{_tierurl("baseline")}">show</a></td></tr>')
+    # The calls-per-day series, shared by Today and Activity (FOUNDER 2026-09-28: the chart matters most).
+    try:
+        from . import spool as _spool_mod
+        _calls_series = _spool_mod.calls_by_day(14)
+    except Exception:                              # noqa: BLE001 — a view must not crash on its data
+        _calls_series = []
     _mon_live = bool((d.get("monitor") or {}).get("running") or (d.get("monitor") or {}).get("servers"))
     today_pane = f"""<section class="pane" id="p9">
     <div class="card">
@@ -3102,9 +3436,13 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
       <div class="mbody" style="padding:16px 18px 20px">
         <div class="tverdict"><span class="th1">{_esc(_t_head)}</span>
           <span class="tsub">{len(classified) - _ghosts} servers{_ghost_note} · {_watched_sum} of {_tools_sum} exposed
-          tools exercised{' · monitor live' if _mon_live else ''}</span>
+          tools exercised{' · monitor live' if _mon_live else ''}{f' · {_queue_term} cannot be finished from here' if _queue_term else ''}</span>
           <span class="bradar">{_radar}</span></div>
+        {_today_tiles(_calls_series, d.get("unscannable"), len(pending or []),
+                      _h.since_words(_origin_of(list(pending or [])), plural=True),
+                      remedy=lambda _nm: uncovered_remedy(_nm, d))}
         <div class="asks">{_asks_html}</div>
+        {_calls_chart(_calls_series)}
         <div class="fhead2">Fleet · worst first</div>
         <table class="ttable">{"".join(_trows) or
           '<tr><td class="dim" style="padding:10px 4px">No server needs attention right now.</td></tr>'}
@@ -3253,20 +3591,66 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         return (f'<div class="fdetail">{_esc(f.get("evidence") or "")}</div>'
                 if _is_cfg(f) else "")
 
+    def _frow(f: dict) -> str:
+        return ((_SEL_TR if tl == _tl_key(f) else "<tr>")
+                + f'<td class="nm">{_esc(f.get("server"))}{_age_note(f)}</td>'
+                f'<td class="nm">{_esc(f.get("tool") or "—")}</td>'
+                f'<td>{_esc(f.get("class") or f.get("code") or "?")}{_foldnote(f)}{_cfg_detail(f)}</td>'
+                f'<td><span class="chip {_fchip(f)}">{_esc(f.get("severity") or "?")}</span></td>'
+                f'<td class="dim ev">{_esc("—" if _is_cfg(f) else (f.get("evidence") or "—"))}</td>'
+                f'<td class="dim">{_esc(f.get("repro"))} {_tl_link(f)}</td></tr>'
+                + (_timeline_row(f) if tl == _tl_key(f) else ""))
+
+    # ISSUES, NOT ROWS (FOUNDER 2026-09-28, adopting Opik's Diagnostics grouping): the same finding on
+    # one server is ONE issue however many tools carry it — six browserstack "undeclared-egress" rows
+    # were one fact. A group of one keeps its exact row; a larger group lists its tools (each with its
+    # own trail link) in a no-script <details>, the union of hosts, and its worst severity. A group
+    # whose trail is open is expanded, so opening a timeline never hides it.
+    _groups: dict[tuple, list[dict]] = {}
+    for f in _f_all:
+        _groups.setdefault((str(f.get("server")), str(f.get("class") or f.get("code") or "?"),
+                            bool(f.get("first_party"))), []).append(f)
+
+    def _grow(fs: list[dict]) -> str:
+        if len(fs) == 1:
+            return _frow(fs[0])
+        worst = min(fs, key=lambda f: _sev_rank.get(str(f.get("severity")).lower(), 9))
+        hosts: list[str] = []
+        for f in fs:
+            for h in str(f.get("evidence") or "").replace(";", ",").split(","):
+                h = h.strip()
+                if h and h != "—" and h not in hosts:
+                    hosts.append(h)
+        opened = any(tl == _tl_key(f) for f in fs)
+        tools = "".join(f'<li><span class="nm">{_esc(f.get("tool") or "—")}</span> '
+                        f'<span class="dim">{_esc(f.get("repro"))}</span> {_tl_link(f)}</li>' for f in fs)
+        row = ((_SEL_TR if opened else '<tr class="igrp">')
+               + f'<td class="nm">{_esc(worst.get("server"))}{_age_note(worst)}</td>'
+               f'<td class="nm">{len(fs)} tools</td>'
+               f'<td>{_esc(worst.get("class") or worst.get("code") or "?")}{_foldnote(worst)}'
+               f'<div class="dt">one issue · {len(fs)} findings</div></td>'
+               f'<td><span class="chip {_fchip(worst)}">{_esc(worst.get("severity") or "?")}</span></td>'
+               f'<td class="dim ev" title="{_esc(", ".join(hosts))}">{_esc(", ".join(hosts[:3]) or "—")}'
+               f'{f" +{len(hosts) - 3} more" if len(hosts) > 3 else ""}</td>'
+               f'<td class="dim">{len(fs)} tools</td></tr>'
+               # The tool list gets the full width beneath its issue: in the narrow tool column the
+               # names broke mid-word ("check_auth_s / tatus", live 2026-09-28).
+               f'<tr class="ilist"><td colspan="6"><details class="itools"{" open" if opened else ""}>'
+               f'<summary>the {len(fs)} tools · each with its own trail</summary><ul>{tools}</ul>'
+               f'</details></td></tr>')
+        return row + "".join(_timeline_row(f) for f in fs if tl == _tl_key(f))
+
     frows = "".join(
-        (_SEL_TR if tl == _tl_key(f) else "<tr>")
-        + f'<td class="nm">{_esc(f.get("server"))}{_age_note(f)}</td>'
-        f'<td class="nm">{_esc(f.get("tool") or "—")}</td>'
-        f'<td>{_esc(f.get("class") or f.get("code") or "?")}{_foldnote(f)}{_cfg_detail(f)}</td>'
-        f'<td><span class="chip {_fchip(f)}">{_esc(f.get("severity") or "?")}</span></td>'
-        f'<td class="dim ev">{_esc("—" if _is_cfg(f) else (f.get("evidence") or "—"))}</td>'
-        f'<td class="dim">{_esc(f.get("repro"))} {_tl_link(f)}</td></tr>'
-        + (_timeline_row(f) if tl == _tl_key(f) else "")
-        for f in sorted(_f_all, key=lambda f: (bool(f.get("first_party")),
-                                               _sev_rank.get(str(f.get("severity")).lower(), 9),
-                                               str(f.get("server"))))) or \
+        _grow(fs) for _k, fs in sorted(
+            _groups.items(),
+            key=lambda kv: (kv[0][2],
+                            min(_sev_rank.get(str(f.get("severity")).lower(), 9) for f in kv[1]),
+                            kv[0][0]))) or \
         ('<tr><td colspan="6" class="dim">No verify has run yet. An empty table here is not a clean '
          'bill of health.</td></tr>')
+    _issue_n = len(_groups)
+    _issue_note = (f" · {_issue_n} issue{'s' if _issue_n != 1 else ''} — the same finding on one server counts once"
+                   if _f_all else "")
 
     _nba_text, _nba_tier = next_best_action(d)
     nba = (f'<div class="nba {_nba_tier}"><b>Next:</b> {_esc(_nba_text)}</div>')
@@ -3403,7 +3787,7 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
 
     runs = "".join(
         f'<tr><td class="dim">{_esc(_local_stamp(getattr(r, "started_at", "")))}</td>'
-        f'<td class="nm">{_esc(getattr(r, "kind", ""))}</td>'
+        f'<td class="nm">{_esc(_run_kind(r))}</td>'
         f'<td><span class="chip {_run_status(r)[1]}">{_esc(_run_status(r)[0])}</span></td>'
         f'<td class="dim">{_esc(str(getattr(r, "target", "") or "fleet-wide")[:56])}</td></tr>'
         for r in (d.get("runs") or [])) or \
@@ -3471,11 +3855,20 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                 f'<td class="dim">{_esc(a.get("basis") or "")}</td><td>{why_cell}</td></tr>')
 
     act_summary = act if isinstance(act, dict) else {}
-    span_first = all_acts[-1].get("when") if all_acts else None
-    span_last = all_acts[0].get("when") if all_acts else None
+    # ONE WINDOW. spool.summarise() counts the last 5,000 rows; the chart under this line counts
+    # 14 days of up to 200,000. On the founder's machine the header read "4729 seen · 167
+    # checked" over "2026-10-01 → 2026-10-08" above a chart reading 87 checked, 3,510 not, over
+    # 09-26 → 10-09, with Today's tiles a third set (2026-10-09). The header now sums the
+    # chart's series, so the three cannot disagree; the one key the series lacks (which of the
+    # declined went to a browser host) is kept from summarise.
+    act_summary = _summary_from_series(_calls_series, act_summary)
+    span_first = (_calls_series[0]["day"] if _calls_series else
+                  (all_acts[-1].get("when") if all_acts else None))
+    span_last = (_calls_series[-1]["day"] if _calls_series else
+                 (all_acts[0].get("when") if all_acts else None))
     acts_notable = "".join(_act_row(a, expand_why=True) for a in notable) or \
         ('<tr><td colspan="6" class="dim">No call in this log was blocked, and nothing it '
-         'covers overstepped its approved baseline.' + monitor_gap_note(d) + '</td></tr>')
+         'covers overstepped its baseline.' + monitor_gap_note(d) + '</td></tr>')
     acts_full = "".join(_act_row(a) for a in all_acts[:500]) or \
         '<tr><td colspan="6" class="dim">Nothing recorded yet — use your agent once.</td></tr>'
     if _foreign_acts:
@@ -3513,6 +3906,9 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
 
     def _dec_what(k: str) -> str:
         it = _dec_items.get(k)
+        if not it and not _h.vouched(_origin_of([k])):
+            return (f'<span class="dim">Moved {_h.since_words(_origin_of([k]))}; your agents '
+                    'cannot call it until you look. Review it in Servers.</span>')
         if not it:
             return ('<span class="dim">Moved since you approved it; your agents cannot call it '
                     'until you look. Review it in Servers.</span>')
@@ -3528,23 +3924,27 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
             _inj = list(rep.hostile)
         for t in (_inj or [])[:2]:
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">rewrote its own '
-                        'description after you approved it — the rug-pull signature.</span>')
+                        'description since its baseline — the rug-pull signature.</span>')
         for t in [x for x in (_esc_ or []) if x not in (_inj or [])][:2]:
+            _what = ", ".join(rep.escalations(t)) or "a safety annotation widened"
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">now declares more '
-                        'power than you approved — it marked itself destructive or open-world '
-                        'after approval.</span>')
+                        f'power than its baseline — {_esc(_what)}.</span>')
         for t in rep.added[:2]:
-            bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">appeared after you '
-                        'approved this server. A tool that shows up later is how a malicious '
-                        'update arrives.</span>')
+            # "after you approved this server" under a row whose baseline nobody approved
+            # (Decisions tab, walk of 0.1.77): the anchor is the baseline, whoever set it.
+            bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">was not in the '
+                        'baseline and appeared since. A tool that shows up later is how a '
+                        'malicious update arrives.</span>')
         for t in rep.removed[:1]:
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">was removed.</span>')
         for t in plain_changed[:1]:
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">changed its '
                         'description.</span>')
-        for t in rep.annotation_changed[:1]:
+        for t in [x for x in rep.annotation_changed if x not in (_esc_ or [])][:1]:
+            # An escalated key already has its sentence above; this is for a plain relabel.
+            _moves = "; ".join(f"{n}: {w} → {v}" for n, w, v in rep.hint_moves(t))
             bits.append(f'<span class="nm">{_esc(t)}</span> <span class="dim">changed its safety '
-                        'annotations — a tool relabelled itself.</span>')
+                        f'hints, nothing widened{(" — " + _esc(_moves)) if _moves else ""}.</span>')
         total = (len(rep.hostile) + len(rep.added) + len(rep.removed) + len(plain_changed)
                  + len(rep.annotation_changed) + len(rep.schema_changed))
         if total > len(bits):
@@ -3554,16 +3954,28 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
                                      'detailed diffs.</span>')
 
     def _dec_chip(k: str) -> str:
-        """What enforcement is ACTUALLY doing about this pending drift. The hook denies by
-        tool-name projection, so a schema/annotation-only change (pending since 2026-08-15,
-        the audit-B2 rug-pull class) leaves every call passing — a flat "Blocked" chip here
-        claimed enforcement that was not happening, the worst lie a security product can
-        render. [CLAUDE-PROPOSED, undecided]: whether schema drift should also deny."""
+        """What enforcement is ACTUALLY doing about this pending drift — the guard's own rules,
+        never a guess. A description change or a new tool is blocked; PERMISSION GROWTH (an
+        annotation escalation or a new destination parameter) is blocked by the same projection
+        rule the hook reads (FOUNDER 2026-10-06); any other schema change waits for a decision and
+        calls still pass (FOUNDER 2026-08-15). A flat "Blocked" for that last case claimed
+        enforcement that was not happening, the worst lie a security product can render."""
         base, latest = _h.approved(store, k), _h.last(store, k)
+        # THE LATCH: back to the approved form now, but changed since approval. The guard holds
+        # exactly `reverted_tools` (the projection reads the same helper); say which.
+        held = _h.reverted_tools(store, k)
+        if held:
+            when = str(next(iter(held.values())).get("at") or "")[:10]
+            return (f'<span class="chip bad"><i></i>Blocked — {_esc(", ".join(sorted(held)))} '
+                    f'changed{(" on " + _esc(when)) if when else ""} and changed back</span>')
         if base and latest and base.get("items") != latest.get("items"):
             return '<span class="chip bad"><i></i>Blocked</span>'
-        return ('<span class="chip warn"><i></i>NOT blocked — schema/annotations only, '
-                'calls still pass</span>')
+        grown = _h._permission_growth(base, latest) if base and latest else {}
+        if grown:
+            what = "; ".join(f"{t}: {', '.join(v)}" for t, v in sorted(grown.items()))
+            return f'<span class="chip bad say"><i></i>Blocked — {_esc(what)}</span>'
+        return ('<span class="chip warn say"><i></i>NOT blocked — an ordinary schema change, '
+                'calls still pass until you decide</span>')
 
     def _dec_who(k: str) -> str:
         at, by = _h.approval_provenance(store, k)
@@ -3582,8 +3994,8 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
         f'<td>{_dec_chip(k)}</td>'
         f'<td>{_dec_action(k)}</td></tr>'
         for k in pending) or \
-        ('<tr><td colspan="4" class="dim">No server with an approved baseline has changed '
-         'since you approved it.' + monitor_gap_note(d) + '</td></tr>')
+        ('<tr><td colspan="4" class="dim">No server has changed since its baseline.'
+         + monitor_gap_note(d) + '</td></tr>')
 
     # While an action runs, the page REFRESHES ITSELF. Telling the user to reload is not a progress
     # indicator: 0.1.20 completed its scan in ~100s and went on showing "Running scan…" forever
@@ -3691,13 +4103,15 @@ def render(d: dict[str, Any], token: str = "", action: dict | None = None,
    grey track, one white card per view, filter row with a right-aligned count, uppercase heads on
    a tinted row, two-line primary cell, fully-rounded tinted tags. Royal blue #2A33C2 stays ours.
    No script — the CSP is `default-src 'none'` and the tabs are pure CSS. */
-/* Palette per the founder's reference (2026-08-15, chosen over Observatory dark): warm
-   sage/cream field, white floating cards, ink-navy type, ONE hot orange accent used sparingly.
-   Danger is deepened to crimson so an alarm never reads as the brand colour. */
-:root{{--page:#ECEFEA;--card:#FFF;--rail:#E3E9E0;--line:#D8DFD3;--line-strong:#C2CCBB;
---ink:#1D2A30;--mut:#5C6B66;--fai:#626D66;--acc:#E8502B;--accent:#E8502B;--acc-ink:#C8401F;--acc-soft:#FCEAE3;
---ok:#157A40;--ok-bg:#E9F3EA;--warn:#96590A;--warn-bg:#FBF1E3;
---bad:#B3261E;--bad-bg:#F9E9E7;--unv:#707B74;--unv-bg:#EDF0EB;
+/* Palette ([FOUNDER] 2026-09-28, superseding 2026-08-15's sage/cream + hot orange): gawk.dev's light
+   theme — paper and ink greys — and colour ONLY for status: green = checked/OK, amber = not
+   checked/warning, red = blocked/needs you. The --acc* tokens keep their names (rules and a test
+   read them) but are ink now: emphasis is weight, underline and ink, never a hue. Tokens measured
+   from gawk.dev's own CSS (--paper/--ink/--hair, --op/--out; amber from its Tailwind scale). */
+:root{{--page:#FAFAF6;--card:#FFF;--rail:#F2F1EA;--line:#E7E6DE;--line-strong:#D8D7CC;
+--ink:#16160F;--mut:#6B6B5E;--fai:#6B6B5E;--acc:#16160F;--accent:#16160F;--acc-ink:#16160F;--acc-soft:#F2F1EA;
+--ok:#157A40;--ok-bg:#EAF4EE;--warn:#B75000;--warn-bg:#FFFBEB;
+--bad:#C0392B;--bad-bg:#FBEAE8;--unv:#6B6B5E;--unv-bg:#F2F1EA;
 --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
 --sans:system-ui,-apple-system,"Segoe UI",sans-serif;
 --ease:cubic-bezier(.23,1,.32,1);
@@ -3798,6 +4212,36 @@ color:var(--fai);margin:0 0 6px}}
 .ttable .id{{font-family:var(--mono);font-size:11px;color:var(--fai);display:block}}
 .ttable .tact{{text-align:right}}
 .ttable .tact a{{color:var(--acc-ink);font-weight:600;font-size:12.5px;text-decoration:none}}
+/* Links are ink now (palette 2026-09-28), so the underline carries the affordance colour used to. */
+body .brief .bask,body .ask.calm a,body .ttable .tact a,body .tgrp a,body .tll,body .clearf,body .whysum{{text-decoration:underline;text-underline-offset:2px}}
+/* Calls per day (panel._calls_chart). Colour only for status: green checked, red blocked, amber not checked. */
+.cchart{{margin:6px 0 16px;padding:12px 14px 10px;border:1px solid var(--line);border-radius:12px;background:var(--card)}}
+.cchart svg{{display:block;width:100%;height:auto}}
+.cchart .grid{{stroke:var(--line);stroke-width:1}}
+.cchart .ax{{font:11px var(--mono);fill:var(--mut)}}
+.cchart rect.ok{{fill:var(--ok)}} .cchart rect.bad{{fill:var(--bad)}} .cchart rect.warn{{fill:#E39B3A}}
+.cchart figcaption{{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:6px;font-size:12px;color:var(--ink)}}
+.cchart figcaption span{{display:inline-flex;align-items:center;gap:6px}}
+.cchart figcaption i{{width:11px;height:11px;border-radius:3px;display:inline-block}}
+.cchart figcaption i.ok{{background:var(--ok)}} .cchart figcaption i.bad{{background:var(--bad)}} .cchart figcaption i.warn{{background:#E39B3A}}
+.cchart figcaption .dim{{color:var(--mut)}}
+.cchart.empty{{color:var(--mut);font-size:13px}}
+/* Findings grouped into issues (panel frows): a group lists its tools in a no-script disclosure. */
+.itools summary{{cursor:pointer;font-weight:600;text-decoration:underline;text-underline-offset:2px}}
+.itools ul{{margin:8px 0 2px;padding-left:18px;font-size:12.5px;line-height:1.8;columns:3 220px;column-gap:28px}}
+.itools li{{break-inside:avoid}} .itools li .nm{{white-space:nowrap}}
+tr.ilist>td{{padding-top:0;border-top:none}} tr.igrp>td{{border-bottom:none}}
+/* Today's at-a-glance tiles (panel._today_tiles): status colour only, and only when non-zero. */
+.ttiles{{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin:12px 0 14px}}
+.tile{{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--card);min-width:0}}
+.tile.wide{{grid-column:span 2}}
+.tile .tl{{font-size:12px;color:var(--mut)}}
+.tile .tv{{font-size:26px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums}}
+.tile .tn{{font-size:12px;color:var(--mut);margin-top:2px}}
+.tile.ok .tv{{color:var(--ok)}}
+.tile.warn{{background:var(--warn-bg);border-color:#F2DDB0}} .tile.warn .tv,.tile.warn .tl,.tile.warn .tn{{color:var(--warn)}}
+.tile.bad{{background:var(--bad-bg);border-color:#EFC3BD}} .tile.bad .tv,.tile.bad .tl{{color:var(--bad)}}
+@media (max-width:1100px){{.ttiles{{grid-template-columns:repeat(3,minmax(0,1fr))}}}}
 .tgrp td{{background:var(--rail);font-family:var(--mono);font-size:11px;letter-spacing:.05em;
 text-transform:uppercase;color:var(--mut);padding:6px 10px}}
 .tgrp a{{color:var(--acc-ink);font-family:var(--sans);font-weight:600;text-transform:none;
@@ -3810,8 +4254,11 @@ margin:0 0 14px;padding:8px 12px;border:1px solid var(--line);border-radius:10px
 background:var(--card)}}
 .jchip{{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);
 padding:3px 10px;border-radius:99px;cursor:pointer}}
-.jchip:hover{{background:var(--srow)}}
-.jchip .jdot{{width:7px;height:7px;border-radius:50%;background:var(--bad)}}
+.jchip:hover{{background:var(--rail)}}
+/* Unfinished setup is not an alarm (palette 2026-09-28): later steps are neutral, the next one
+   amber, done green. Red is for blocked / needs you, never for "not done yet". */
+.jchip .jdot{{width:7px;height:7px;border-radius:50%;background:var(--line-strong)}}
+.jchip.now .jdot{{background:var(--warn)}}
 .jchip.done .jdot{{background:var(--ok)}}
 .jchip.done{{color:var(--fai)}}
 details.cwrap{{margin-top:14px}}
@@ -3845,7 +4292,7 @@ font-family:var(--mono);font-size:14px;font-weight:700;
 background:var(--acc-soft);color:var(--acc-ink)}}
 .mmark.ok{{background:var(--ok-bg);color:var(--ok)}}
 .mmark.warn{{background:var(--warn-bg);color:var(--warn)}}
-.mmark.bad{{background:var(--acc-soft);color:var(--acc-ink)}}
+.mmark.bad{{background:var(--bad-bg);color:var(--bad)}}
 .mmark.unv{{background:var(--rail);color:var(--mut)}}
 .mmark.obs{{background:var(--rail);color:var(--mut);border:1px dashed var(--line-strong)}}
 .mclose{{width:30px;height:30px;border-radius:50%;flex:none;display:grid;place-items:center;
@@ -3955,8 +4402,8 @@ overflow-wrap:anywhere}}
    in Chrome: table 659px in a 558px box). `anywhere` lets the token break and the table fit. */
 .arows .fixit{{overflow-wrap:anywhere}}
 .arows td.nm{{font-family:var(--mono);white-space:nowrap;width:1%}}
-.fixit{{margin-top:5px;padding:5px 8px;border-left:2px solid var(--acc);
-background:var(--acc-soft);color:var(--ink);font-size:12px;line-height:1.5}}
+.fixit{{margin-top:5px;padding:5px 8px;border-left:2px solid var(--warn);
+background:var(--warn-bg);color:var(--ink);font-size:12px;line-height:1.5}}
 .nba{{display:flex;gap:8px;align-items:baseline;margin:0 16px 13px;padding:11px 13px;
 border-radius:10px;font-size:13.5px;border:1px solid var(--line);background:var(--card)}}
 .nba.ok{{border-color:var(--ok);background:var(--ok-bg);color:var(--ok)}}
@@ -4042,22 +4489,25 @@ color:var(--warn);background:var(--warn-bg)}}
 /* .chip is the status pill — no-wrap. `.pill` is the NAV tab whose blurb MUST wrap; naming it
    here once painted every rail blurb as one endless line straight across the cards. */
 .chip{{white-space:nowrap}}
+/* A sentence-length chip (the Decisions severity) wraps: no-wrap pushed "calls still pass until
+   you decide" past the card's edge (walk of 0.1.81). */
+.chip.say{{white-space:normal;align-items:flex-start;border-radius:12px}}
 .act-sm{{font:inherit;font-size:12px;padding:4px 11px;border:1px solid var(--line);
 border-radius:8px;background:var(--card);color:var(--mut);cursor:pointer;
 transition:border-color 160ms var(--ease),color 160ms var(--ease),transform 160ms var(--ease)}}
 .act-sm:active{{transform:scale(.97)}}
-.act-sm.warn{{border-color:var(--acc);color:var(--acc);margin-left:6px}}
+.act-sm.warn{{border-color:var(--warn);color:var(--warn);margin-left:6px}}
 .bars{{padding:2px 16px 16px}}
 .bar{{display:flex;height:9px;border-radius:999px;overflow:hidden;background:var(--rail);
 margin:2px 0 10px}}
-.seg.blocked,.seg.findings{{background:var(--bad)}}.seg.changed{{background:var(--warn)}}
+.seg.blocked,.seg.findings{{background:var(--bad)}}.seg.changed,.seg.appeared{{background:var(--warn)}}
 .seg.unverified{{background:var(--unv)}}.seg.baseline{{background:var(--ok)}}
 /* OBSERVED reuses the unverified token, hatched — the palette is fixed (sage/cream + one orange),
    so a fifth tier gets a TEXTURE, not a sixth colour, and still reads as "less than baseline". */
 .seg.observed{{background:repeating-linear-gradient(135deg,var(--unv) 0 4px,var(--rail) 4px 8px)}}
 .legend{{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--mut)}}
 .sw{{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}}
-.sw.blocked,.sw.findings{{background:var(--bad)}}.sw.changed{{background:var(--warn)}}
+.sw.blocked,.sw.findings{{background:var(--bad)}}.sw.changed,.sw.appeared{{background:var(--warn)}}
 .sw.unverified{{background:var(--unv)}}.sw.baseline{{background:var(--ok)}}
 .sw.observed{{background:repeating-linear-gradient(135deg,var(--unv) 0 3px,var(--rail) 3px 6px)}}
 .legend b{{font-variant-numeric:tabular-nums}}
@@ -4149,7 +4599,7 @@ var(--warn);border-radius:10px;padding:11px 16px;font-size:13.5px;margin-bottom:
 .ftwrap{{overflow-x:auto;margin-top:10px}}
 svg.ftree{{display:block;max-width:100%;height:auto}}
 svg.ftree .tn rect{{fill:var(--card);stroke:var(--line);stroke-width:1}}
-svg.ftree .tn:hover rect{{stroke:var(--acc-ink)}}
+svg.ftree .tn:hover rect{{stroke:var(--acc-ink)}} svg.ftree .tnx:hover rect{{stroke:var(--line)}}
 svg.ftree .tnsel rect{{stroke:var(--acc);stroke-width:1.6;fill:var(--acc-soft)}}
 svg.ftree .tnbad rect{{stroke:var(--bad)}}
 svg.ftree .tnt{{font:550 12.5px var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace);
@@ -4247,12 +4697,12 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
          founder read a 25-minute-old process three times and reported "nothing changed" —
          correctly, because that process predated the changes. -->
     <span class="bsub" title="when the code being served was last modified, and when this process started">
-      local · this machine only · code {_esc(_CODE_AT)} · started {_esc(_STARTED)}</span></div></div>
+      local · this machine only · code {_esc(_CODE_AT)} · started {_esc(_STARTED)}</span></div>
   {'' if token else
    '<div class="ronote">Read-only view — this page holds the state but none of the controls. '
    'The action buttons live only on the tokened link (ending <code>?t=…</code>) that '
    '<code>mcpgawk panel</code> printed in your terminal. Reopen from there to act. '
-   'That is deliberate: a bookmark or restored tab must not be able to drive this machine.</div>'}
+   'That is deliberate: a bookmark or restored tab must not be able to drive this machine.</div>'}</div>
   <div class="rail">
     <label class="pill" for="n9"><span class="dot"></span><span class="pw"><span class="prow">Today{f'<span class="ct{" alert" if _asks_alarm else ""}">{_asks_n}</span>' if _asks_n else ''}</span><span class="pdesc">what needs you, and the fleet worst first</span></span></label>
     <label class="pill" for="n4"><span class="dot"></span><span class="pw"><span class="prow">History</span><span class="pdesc">every call, run and decision, newest first</span></span></label>
@@ -4297,7 +4747,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
            is only made not to impersonate the one being checked. Note for whoever edits this
            comment: do not spell that element out literally here — a comment containing it is
            found by the same search, which is exactly how this went wrong once. -->
-      <details class="cwrap ftable">
+      <details class="cwrap ftable"{" open" if sel_active else ""}>
         <summary>Every server as one flat table</summary>
         {filterbar}
         {servers_table}
@@ -4321,7 +4771,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
     <div class="card">
       <div class="chead"><h1>Findings</h1>
         <div class="tools"><a class="gbtn" href="/export/findings.csv">Export .csv</a></div></div>
-      <div class="filters"><span class="count" style="margin-left:0">{fcount}</span></div>
+      <div class="filters"><span class="count" style="margin-left:0">{fcount}{_issue_note}</span></div>
       <div class="note">First-party egress — a server reaching its own vendor API — is listed and
         folded, not hidden. 42 of 42 findings on a real fleet were that; a detector that fires on
         normal traffic teaches you to ignore it.</div>
@@ -4422,6 +4872,7 @@ padding:10px 12px;border-radius:10px;overflow-x:auto;white-space:pre}}
           <a class="gbtn" href="/export/calls.csv">Export .csv</a></div></div>
       <div class="filters"><span class="count" style="margin-left:0">{_activity_headline(act_summary)}
         · {len(notable)} denied · {_esc(_span)}</span></div>
+      {_calls_chart(_calls_series)}
       <h2>Needs your attention — blocked calls, with the full reason</h2>
       <div class="tscroll" tabindex="0" role="region" aria-label="table, scrolls horizontally"><table><thead><tr><th>when</th><th>agent</th><th>server.tool</th><th>decision</th>
       <th>basis</th><th>why (verbatim)</th></tr></thead><tbody>{acts_notable}</tbody></table></div>
@@ -4529,10 +4980,11 @@ def state(d: dict[str, Any] | None = None) -> dict[str, Any]:
         "calls": [{k: c.get(k) for k in ("ts", "decision", "server", "tool", "adapter", "basis")}
                   for c in calls[:50]],
         "breakdown": {k: v for k, v in call_breakdown(calls).items()},
-        "runs": [{"started_at": str(getattr(r, "started_at", "")), "kind": getattr(r, "kind", ""),
+        "runs": [{"started_at": str(getattr(r, "started_at", "")), "kind": _run_kind(r),
                   "status": getattr(r, "status", ""), "target": getattr(r, "target", "") or "",
                   "run_id": getattr(r, "run_id", "")} for r in (d.get("runs") or [])],
         "pending": list(d.get("pending") or []),
+        "appeared": sorted(d.get("appeared") or {}),
         "verify_blocked": d.get("verify_blocked"),
         # The UI must know whether an action is POSSIBLE before it offers it. A button that is
         # rendered and then refuses is the thing this layer exists to stop.
@@ -4917,6 +5369,8 @@ def _run_action_bg(kind: str, target: str | None = None,
                 res = run_login(target)
             elif kind == "login-done":
                 res = run_login_done(target)
+            elif kind == "login-backend":
+                res = run_login_backend(target)
             else:
                 res = {"ok": False, "message": f"unknown action {kind!r}"}
             msg = res.get("message") or ("done" if res.get("ok") else "failed")
@@ -5104,11 +5558,11 @@ def role_evidence(d: dict[str, Any]) -> str:
     basis is a guess wearing a name."""
     roles = roles_from_baseline(d)
     if not roles:
-        return ("No approved baseline yet, so there is nothing to build roles from. Scan and "
+        return ("No baseline yet, so there is nothing to build roles from. Scan and "
                 "approve a server first — a role is a statement about tools we have seen.")
     reads = len([g for g in roles.get("admin", []) if g == "read"])
     writes = len([g for g in roles.get("admin", []) if g.startswith("write:")])
-    return (f"Built from your approved baselines: "
+    return (f"Built from your baselines: "
             f"{'read-only tools' if reads else 'no read-only tools'}, {writes} write/destructive "
             f"tool(s)"
             + (" · tools your servers left unannotated are granted only to admin"
@@ -5491,7 +5945,7 @@ def session_log_lines(limit: int = 30) -> list[dict[str, str]]:
         if Path(runlog.default_path()).is_file():
             import socket as _sock
             for r in runlog.list_runs(limit=15):
-                what = " ".join(x for x in (getattr(r, "kind", ""), getattr(r, "target", ""))
+                what = " ".join(x for x in (runlog.display_kind(r), getattr(r, "target", ""))
                                 if x)
                 status = getattr(r, "status", "")
                 # The same liveness rule as the Evidence table: dead recorder ≠ running.
@@ -5523,6 +5977,7 @@ def session_log_lines(limit: int = 30) -> list[dict[str, str]]:
         # report" (public suite, 2026-09-09). The alerts do not need this rule; only the per-server
         # line does. So an absent engine costs exactly the classification it can no longer make,
         # and nothing else.
+        never_succeeded: Any = None   # the paid engine's rule, or None on the free build
         try:
             from gawk_platform.monitor.status import never_succeeded
         except Exception:  # noqa: BLE001 — free build: no paid engine, so no tally to read
@@ -5900,7 +6355,9 @@ def gateway_status(home: Path | str | None = None) -> dict[str, Any]:
                                "listen": r.summary.get("listen"),
                                "keys": bool(r.summary.get("keys")),
                                "keys_file": r.summary.get("keys_file"),
-                               "stdio": r.summary.get("transport") == "stdio"}
+                               "stdio": r.summary.get("transport") == "stdio",
+                               # T2-2: credential-free remote backends, for one-click sign-in.
+                               "remote_backends": r.summary.get("remote_backends") or []}
                 break
     except Exception as exc:                      # noqa: BLE001 — recorded, never disguised
         out["runs_error"] = str(exc)
@@ -6111,7 +6568,8 @@ def _gateway_pane(gw: dict[str, Any], token: str = "",
                  else " · stdio (no listener)")
         keys = " · per-principal keys in force" if live.get("keys") else ""
         live_html = (f'<div class="note ok">Gateway RUNNING since {since} — in front of '
-                     f'{what}{where}{keys}</div>' + _snippet_for(live)
+                     f'{what}{where}{keys}</div>' + _gateway_signin_block(live, token)
+                     + _snippet_for(live)
                      + _issue_key_form(live, token, action)
                      + _playground_form(live, token))
     elif gw.get("runs_error"):
@@ -6649,7 +7107,7 @@ def run_pin(name: str | None) -> dict[str, Any]:
     rows, changed, failed = [], 0, []
     for path in paths:
         edit = configedit.plan_pin(path, name, spec, pinned)
-        res = configedit.apply_pin(edit) if edit.ok else {"ok": False, "changed": 0,
+        res: dict[str, Any] = configedit.apply_pin(edit) if edit.ok else {"ok": False, "changed": 0,
                                                           "message": edit.reason}
         # the banner's row shape is server/outcome/detail/level — anything else renders blank
         rows.append({"server": str(path).replace(str(Path.home()), "~"),
@@ -6824,8 +7282,16 @@ def run_login(name: str | None) -> dict[str, Any]:
             return {"ok": False, "message": f"{name} does not offer a browser sign-in: {unsupported}"}
         return {"ok": False,
                 "message": f"sign-in for {name} did not complete — {_login_failure_detail(name, url, out)}"}
+    return _run_oauth_login(name, url, _transport_flag(entry, url), entry)
+
+
+def _run_oauth_login(name: str, url: str, flag: str, entry: dict | None = None) -> dict[str, Any]:
+    """The browser OAuth sign-in for ONE url, via `mcpgawk scan --http|--sse <url> --login` as a
+    child, publishing the authorise link and judging success by a token ON DISK. Split out of
+    run_login (unchanged) so the Gateway tab (T2-2) signs a gateway backend in the same way."""
+    from . import remote_login
     try:
-        proc, log_path = _run_login_cli(url, _transport_flag(entry, url))
+        proc, log_path = _run_login_cli(url, flag)
     except Exception as exc:                      # noqa: BLE001
         return {"ok": False, "message": f"sign-in for {name} did not complete: {exc}"}
     _register_login_child(name, proc)
@@ -6880,13 +7346,65 @@ def run_login(name: str | None) -> dict[str, Any]:
     # never the child's LAST line: that was the scan footer ("Scanned locally — your server
     # inventory never left this machine.") on the founder's figma click, 2026-09-03, with the
     # 403 registration refusal five lines above it.
-    _vl = vendor_signin_limit(entry)
+    _vl = vendor_signin_limit(entry) if entry is not None else None
     if _vl:
         return {"ok": False,
                 "message": (f"sign-in for {name} did not complete — {_vl['reason']} "
                             f"({_vl['symptom']}). {_vl['url']}")}
     return {"ok": False,
             "message": f"sign-in for {name} did not complete — {_login_failure_detail(name, url, out)}"}
+
+
+def run_login_backend(name: str | None) -> dict[str, Any]:
+    """T2-2: sign in to a gateway backend by NAME. The URL comes from the running gateway's own run
+    record (credential-free remote backends only), never from the form: a panel that signed in to
+    whatever URL a request named would be a way to make it authorise anything."""
+    live = (gateway_status() or {}).get("live") or {}
+    match = next((b for b in live.get("remote_backends") or [] if b.get("name") == name), None)
+    if not name or match is None:
+        return {"ok": False, "message": f"no running gateway backend named {name!r} to sign in to"}
+    url = str(match["url"])
+    return _run_oauth_login(name, url, "--sse" if url.rstrip("/").endswith("/sse") else "--http")
+
+
+def _gateway_signin_block(live: dict[str, Any], token: str) -> str:
+    """One Sign in button per gateway backend with no usable stored sign-in (T2-2)."""
+    from . import remote_login
+    rows, pending = [], []
+    refused = remote_login.auth_needed()               # evidence: which backends REFUSED us
+    for b in live.get("remote_backends") or []:
+        url = str(b.get("url") or "")
+        name_ = str(b.get("name") or url)
+        # A button only on evidence (a 401 / needed re-auth the gateway recorded) and only while
+        # nothing usable is stored. A public backend (deepwiki) never refused, so it gets none.
+        if not url or refused.get(name_) != url:
+            continue
+        if remote_login.stored_access_token(url):
+            # Refused at this gateway's start, signed in since: the running gateway connects
+            # backends only at start (browser walk, 2026-09-24), so say what completes it.
+            pending.append(_esc(name_))
+            continue
+        name = str(b.get("name") or url)
+        from urllib.parse import urlsplit
+        host = _esc(urlsplit(url).hostname or "")
+        rows.append(f'<form method="post" style="display:inline-block;margin:.5rem .5rem 0 0">'
+                    f'<input type="hidden" name="token" value="{_esc(token)}">'
+                    f'<input type="hidden" name="key" value="{_esc(name)}">'
+                    f'<button class="act-sm" name="act" value="login-backend">Sign in to '
+                    f'{_esc(name)}</button> <span class="dim">{host}</span></form>')
+    note = ""
+    if pending:
+        note = (f'<div class="note ok">Signed in to {", ".join(pending)} — restart the gateway to '
+                f'connect {"it" if len(pending) == 1 else "them"}: it reaches its backends when it '
+                f'starts.</div>')
+    if not rows:
+        return note
+    # Buttons INSIDE the note: a row outside it fell off the card's left edge (browser walk,
+    # 2026-09-24) — one grid, not a stray line under the box.
+    return ('<div class="note warn">These gateway backends have no usable sign-in, so the gateway '
+            'cannot reach them. Sign in once here; the gateway, scans and Drift Watch then share '
+            'the same stored sign-in (encrypted on this machine).<div>' + "".join(rows)
+            + '</div></div>' + note)
 
 
 def _login_failure_detail(name: str, url: str, out: str) -> str:
@@ -7201,8 +7719,12 @@ def uncovered_reasons(d: dict[str, Any], by_server: dict[str, int] | None = None
     entries = d.get("entries") or {}
     store = d.get("store") or {}
     known = set()
-    for k in (store.get("servers") or {}):
+    for k, e in (store.get("servers") or {}).items():
         known.add(str(k).split(":", 1)[-1].split("#", 1)[0])
+        # The config name, not only the identity: youspot's record is `mcp:connect` (what the
+        # server calls itself) with alias "youspot" (what the config calls it), and this said
+        # "it has no baseline yet" about an approved server (Agents tab, 2026-10-09).
+        known.update(str(a) for a in ((e or {}).get("aliases") or []))
     out: list[dict[str, Any]] = []
     for name, n in (by_server or {}).items():
         entry = entries.get(name)
@@ -7420,7 +7942,7 @@ def signin_asks(entries: dict) -> list[str]:
 
 #: (identity, store) for the LAST store read by `_store_for_buttons`. Not a TTL cache: the key is
 #: the file's own identity, so a write invalidates it immediately and a stale render is impossible.
-_STORE_MEMO: tuple[tuple[str, int, int, int], dict[str, Any]] | None = None
+_STORE_MEMO: tuple[tuple[str, int, int, int, Any], dict[str, Any]] | None = None
 
 
 def _store_for_buttons() -> dict[str, Any]:
@@ -7707,8 +8229,8 @@ def fleet_verify_targets() -> tuple[dict[str, dict[str, Any]], dict[str, dict[st
         except Exception:  # noqa: BLE001 — no readable config = no through-gateway routing
             _gw_backends = set()
 
-    local = {}
-    gatewayed = {}
+    local: dict[str, dict[str, Any]] = {}
+    gatewayed: dict[str, dict[str, Any]] = {}
     for n, e in entries.items():
         if not (isinstance(e, dict) and e.get("command")):
             continue
@@ -7946,7 +8468,7 @@ def run_verify_fleet(only: str | None = None) -> dict[str, Any]:
                 for f in (s.get("findings") or []):
                     if f.get("suppressed"):
                         continue
-                    ev = f.get("evidence") if isinstance(f.get("evidence"), dict) else {}
+                    ev = _dict_at(f, "evidence")
                     hosts = [str(x) for x in (ev.get("egress") or ev.get("hosts") or [])]
                     tool = str(f.get("tool") or (f.get("candidate") or {}).get("toolName") or "?")
                     if first_party(sname, hosts, all_targets.get(sname)):
@@ -8209,7 +8731,7 @@ def next_token(it: dict[str, Any]) -> str:
 # the only two the dashboard counted before the queue became its source. Setup steps (never
 # measured, verify unfinished, monitoring off, no hook) are real work and they COUNT, but they do
 # not shout: a first run paints them the moment the tool is installed.
-ALARM_QUEUE_KINDS = frozenset({"decision", "signin"})
+ALARM_QUEUE_KINDS = frozenset({"decision", "appeared", "signin"})
 
 
 def queue_alarms(items: list[dict[str, Any]]) -> bool:
@@ -8224,6 +8746,15 @@ def queue_alarms(items: list[dict[str, Any]]) -> bool:
                for it in items)
 
 
+def _origin(store: dict[str, Any], key: str) -> str | None:
+    """`history.baseline_origin`, never raising: an unreadable entry has no known origin."""
+    try:
+        from .history import baseline_origin
+        return baseline_origin(store, key)
+    except Exception:  # noqa: BLE001 — wording only; None keeps the long-standing words
+        return None
+
+
 def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset()) -> list[dict[str, Any]]:
     """The human gates on this machine, one entry each, in the order they are served (the
     spec's kinds): 1 servers whose agents are refused right now (changed since approval, newest
@@ -8234,7 +8765,7 @@ def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset())
     the person set aside on this page load — URL state, nothing stored. Pure over `collect()`."""
     from . import decide as _decide
     from . import history as _h
-    store = d.get("store") if isinstance(d.get("store"), dict) else {"servers": {}}
+    store = _dict_at(d, "store", {"servers": {}})
     items: list[dict[str, Any]] = []
     try:
         pend = _decide.pending_decisions(store)
@@ -8251,6 +8782,12 @@ def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset())
                       "changes": total, "hostile": list(rep.hostile),
                       "approved_at": str(entry.get("approved_at") or ""),
                       "approved_by": str(entry.get("approved_by") or ""),
+                      # The baseline's own time, for the head when no approval is stamped.
+                      "baseline_at": str((_h.approved(store, it["key"]) or {}).get("measured_at")
+                                         or ""),
+                      # history's one origin rule, so a fleet-accepted first sighting is not
+                      # told "nobody has approved this server yet".
+                      "origin": _origin(store, it["key"]),
                       "seen_at": str(it.get("seen_at") or "")})
     entries = d.get("entries") or {}
     _calls = d.get("fleet_calls")
@@ -8269,8 +8806,27 @@ def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset())
                       "vendor_limit": vendor_signin_limit(e),
                       "signin": _st, "terminal": bool(_st.get("terminal"))})
     asks = {it["key"] for it in items if it["kind"] == "signin"}
-    fleet = [r for r in classified_servers(d) if not (r[1] or {}).get("_baseline_only")]
+    _classified = classified_servers(d)
+    fleet = [r for r in _classified if not (r[1] or {}).get("_baseline_only")]
     by_name = {n: (e, k) for n, e, k, _t in fleet}
+    # 1b — APPEARED: a trust decision like a changed server, so it is served beside them, and as
+    #      itself. It used to fall through to "never measured — scan it", the wrong decision and
+    #      the wrong verb: a scan holds the sighting, it never trusts it; only approve does.
+    _appeared = d.get("appeared") or {}
+    _keys_all = {n: k for n, _e, k, _t in _classified}
+    _since = str(d.get("appeared_since") or "an earlier date")
+    _decisions_end = sum(1 for it in items if it["kind"] == "decision")
+    for _i, n in enumerate(sorted(_appeared)):
+        _tg = [t for _k, t in (_appeared.get(n) or [])]
+        k = _keys_all.get(n)
+        items.insert(_decisions_end + _i, {
+            "kind": "appeared", "key": n, "name": n, "store_key": k,
+            "held": bool(k) and k in _h.held(store),
+            "where": [str((t or {}).get("url") or " ".join((t or {}).get("command") or []))
+                      for t in _tg if (t or {}).get("url") or (t or {}).get("command")],
+            "clients": [str(_k).split("/", 1)[0] for _k, _t in (_appeared.get(n) or [])
+                        if "/" in str(_k)],
+            "since": _since})
     # 3 — findings a verify reproduced: not first-party (folded, not hidden — the Findings page
     # keeps them), not muted by the person or the engine — `muted_by_you`, the same reader the
     # Findings tab uses, over the flag collect() stamped. This used to consult the store on its
@@ -8290,7 +8846,7 @@ def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset())
                       "evidence_full": str(f.get("evidence_full") or "")})
     # 4 — configured, never measured: no approved baseline and no sign-in in the way.
     for n, e, k, _t in fleet:
-        if n in asks:
+        if n in asks or n in _appeared:
             continue
         if k is None or not _h.approved(store, k):
             items.append({"kind": "unmeasured", "key": n, "name": n,
@@ -8305,19 +8861,23 @@ def next_queue(d: dict[str, Any], skip: set[str] | frozenset[str] = frozenset())
             items.append({"kind": "unverified", "key": n, "name": n, "reasons": reasons[:3],
                           "status": str(v.get("status") or ""), "at": str(v.get("at") or "")})
     # 6 — approved servers with nothing re-checking them.
-    mon = d.get("monitor") if isinstance(d.get("monitor"), dict) else {}
-    approved_n = sum(1 for _n, _e, k, _t in fleet if k and _h.approved(store, k))
+    mon = _dict_at(d, "monitor")
+    approved_keys = [k for _n, _e, k, _t in fleet if k and _h.approved(store, k)]
+    approved_n = len(approved_keys)
     if approved_n and not mon.get("running"):
         alerts = [a for a in (mon.get("alerts") or []) if isinstance(a, dict) and a.get("state") == "pending"]
         last = max((str(x.get("last_check") or "") for x in (mon.get("servers") or [])
                     if isinstance(x, dict)), default="")
+        # "approved" is the baseline's origin, not the record's presence (2026-10-10): the words
+        # come from history.at_baseline_words, the one rule every count surface prints from.
         items.append({"kind": "unwatched", "key": "monitor", "name": "monitor",
-                      "approved": approved_n, "alerts": len(alerts), "last_check": last})
+                      "approved": approved_n, "alerts": len(alerts), "last_check": last,
+                      "words": _h.at_baseline_words_for(store, approved_keys, plural=True)})
     # 7 — agents whose calls pass with no check: a hook point not installed, or none at all.
-    for client, label, state, n, det in _agent_rows(d):
+    for client, label, state, n_servers, det in _agent_rows(d):
         if state != "on":
             items.append({"kind": "unhooked", "key": client, "name": label, "state": state,
-                          "servers": n, "detail": det})
+                          "servers": n_servers, "detail": det})
     # 8 — servers this machine's AGENTS CALL that no config on it declares. Nothing here can
     #     launch them, so the item is terminal and sinks — but its absence was the loudest gap on
     #     the founder's machine: 1605 unchecked calls to a server that appeared on no screen.
@@ -8396,31 +8956,41 @@ def _next_diff(report) -> str:
         return ('<div class="ev danger"><div class="lbl">This baseline could not be read</div>'
                 f'<div class="was">{_esc(report.unreadable)}</div></div>')
     texts = getattr(report, "texts", {}) or {}
-    for tool in report.hostile:
+    # ONLY AN INJECTED KEY IS "the rug-pull signature" (same split as drift.render and
+    # decide._diff_block, 2026-10-09): `hostile` is injected ∪ escalated, and an annotation
+    # flip has no rewritten text to show. Escalated keys say what grew, below.
+    _injected = getattr(report, "injected", None)
+    if _injected is None:
+        _injected = list(report.hostile)
+    for tool in _injected:
         rows.append(f'<div class="ev danger"><div class="lbl">{_esc(tool)} — rewrote its own '
-                    'description after you approved it: the rug-pull signature</div>'
+                    'description since its baseline: the rug-pull signature</div>'
                     + _change_excerpt(*texts.get(tool, ("", ""))) + '</div>')
     for tool in report.added:
-        rows.append(f'<div class="ev"><div class="lbl">+ {_esc(tool)} — did not exist when you '
-                    'approved this server</div></div>')
+        # "when you approved this server" under a head saying nobody did (notion, /next, the
+        # founder's 0.1.75 panel): the anchor is the baseline, whoever set it.
+        rows.append(f'<div class="ev"><div class="lbl">+ {_esc(tool)} — not in the baseline; '
+                    'added since</div></div>')
     for tool in report.removed:
         rows.append(f'<div class="ev"><div class="lbl">− {_esc(tool)} — removed</div></div>')
     for tool in report.changed:
-        if tool in report.hostile:
+        if tool in _injected:
             continue
         rows.append(f'<div class="ev"><div class="lbl">~ {_esc(tool)} — description changed</div>'
                     + _change_excerpt(*texts.get(tool, ("", ""))) + '</div>')
     for tool in report.annotation_changed:
-        rows.append(f'<div class="ev danger"><div class="lbl">{_esc(tool)} — safety annotations '
-                    'changed: a tool relabelled itself</div></div>')
+        # One row per key, with the was/now (the walk of 0.1.75 showed the escalated tool twice).
+        # The same row the decide page writes: a rule in one file is not a rule.
+        from .decide import _hint_row
+        rows.append(_hint_row(report, tool))
     for tool in report.schema_changed:
         rows.append(f'<div class="ev"><div class="lbl">~ {_esc(tool)} — inputs changed</div></div>')
     return "\n".join(rows) or '<div class="ev"><div class="lbl">No detail recorded.</div></div>'
 
 
 _NEXT_CSS = """
-:root{--page:#ECEFEA;--card:#FFF;--line:#D8DFD3;--line-strong:#C2CCBB;--ink:#1D2A30;--mut:#5C6B66;
---fai:#626D66;--acc:#E8502B;--acc-ink:#C8401F;--acc-soft:#FCEAE3;--bad:#B3261E;--bad-bg:#F9E9E7;
+:root{--page:#FAFAF6;--card:#FFF;--line:#E7E6DE;--line-strong:#D8D7CC;--ink:#16160F;--mut:#6B6B5E;
+--fai:#6B6B5E;--acc:#16160F;--acc-ink:#16160F;--acc-soft:#F2F1EA;--bad:#C0392B;--bad-bg:#FBEAE8;
 --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
 *{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);
 font:14px/1.5 system-ui,-apple-system,"Segoe UI",Inter,sans-serif}
@@ -8438,6 +9008,7 @@ h1{font-size:26px;line-height:1.25;margin:0 0 10px;font-weight:600}
 .ev .lbl{font-weight:600}.ev.danger .lbl{color:var(--bad)}
 .ev .was,.ev .now{font-family:var(--mono);font-size:12px;white-space:pre-wrap;margin-top:4px;color:var(--mut)}
 .ev .now{color:var(--ink)}.ev .was b,.ev .now b{font-family:var(--mono);font-weight:600;margin-right:6px}
+.ev .moves{font-family:var(--mono);font-size:12px;white-space:pre-wrap;margin-top:4px;color:var(--ink)}
 .ev .same{font-family:var(--mono);font-size:12px;color:var(--mut);margin-top:4px}
 .actions{display:flex;align-items:center;gap:12px;margin:0 0 10px}
 .actions form{display:inline}.spacer{flex:1}
@@ -8588,26 +9159,27 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
         nxt = items[1] if len(items) > 1 else None
         n_dec = sum(1 for x in items if x["kind"] == "decision")
         if it["kind"] == "decision":
-            when = _local_stamp(it["approved_at"])[:10] if it["approved_at"] else ""
-            # NEVER SAY "you approved it" WHEN NOBODY DID. `history.approved()` falls back to the
-            # OLDEST SIGHTING for a server that was never through `approve`, so this screen was
-            # asserting an approval the record does not carry (dadan, 2026-09-09: approved_at was
-            # None and the headline still read "changed since you approved it"). The fallback is
-            # right — comparing against the first sighting beats comparing against nothing — but
-            # the sentence has to say which anchor it actually used.
-            head = (f'{_esc(it["name"])} changed since you approved it on {_esc(when)}.'
-                    if when else
-                    f'{_esc(it["name"])} changed since it was first seen — '
-                    'nobody has approved this server yet.')
+            # NEVER SAY "you approved it" WHEN NOBODY DID — and never say "nobody has" when
+            # someone did. This ladder used to key on the presence of approved_at and fell to
+            # "nobody has approved this server yet" for a record that simply predated the
+            # field, while the scan read the same record as "since you approved it" (notion,
+            # brandfetch, 2026-10-09). One sentence now, `history.changed_head`, from the one
+            # origin rule; the date is the approval's when there is one, else the baseline's.
+            from .history import changed_head as _changed_head
+            _stamp = it["approved_at"] or it.get("baseline_at") or ""
+            when = _local_stamp(_stamp)[:10] if _stamp else ""
+            head = _esc(f'{it["name"]} '
+                        f'{_changed_head(it.get("origin"), ("on " + when) if when else None)}.')
             n = it["changes"]
             # NAME THE KIND THAT CHANGED. "the tools it declares" was hardcoded, so a resource or
             # prompt change was reported as a tool change (dadan again: the one change was
             # `resource.dadan-video-card` and the line read "1 change to the tools it declares").
             noun = _kinds_phrase(it["report"])
             sub = (f'{n} change{"s" if n != 1 else ""} to the {noun} it declares. No agent can call '
-                   'it until you decide — a server that changes after you approved it is the '
+                   'it until you decide — a change under a recorded baseline is the '
                    'rug-pull shape.'
-                   + (f' Approved by {_esc(it["approved_by"])}.' if it["approved_by"] else '')
+                   + (f' Approved by {_esc(it["approved_by"])}.'
+                      if it["approved_by"] and it.get("origin") != "unattended" else '')
                    + (f' Change first seen {_esc(_local_stamp(it["seen_at"]))}.' if it["seen_at"] else ''))
             evidence = ('<h2>What changed</h2>' + _next_diff(it["report"]))
             acts = (f'<form method="POST" action="/"><input type="hidden" name="token" value="{tok}">'
@@ -8827,6 +9399,33 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
                     ('Mute records your judgement on this finding id in the trust store; the '
                      'finding keeps rendering as "muted by you" and counts in mcpgawk status.'))
             eyebrow = f'1 OF {_eyebrow_n} · FINDING TO REVIEW · {_esc(it["severity"].upper() or "?")}'
+        elif it["kind"] == "appeared":
+            head = f'{_esc(it["name"])} appeared since your fleet approval.'
+            sub = (f'It is in an agent config that was approved on {_esc(it["since"])} without it '
+                   '— named, not trusted. Nothing you approved checks its calls.')
+            _wh = "".join(f'<div class="was">{_esc(w)}</div>' for w in it.get("where") or [])
+            evidence = ('<h2>Where it points</h2><div class="ev"><div class="lbl">'
+                        + (f'in the config of {_esc(", ".join(it["clients"]))}' if it.get("clients")
+                           else 'in no agent config now — only its kept sighting remains')
+                        + f'</div>{_wh}</div>')
+            if it.get("held") and it.get("store_key"):
+                # A sighting is held: approving adopts exactly that surface and admits the entry
+                # to the fleet, which is what ends the appeared state.
+                acts = (_form("approve", it["store_key"], "Approve after review")
+                        + f'<a class="btn" href="{_skip_url(it)}">Not now</a>')
+                note = ('Review where it points first. Approve records its kept sighting as the '
+                        'baseline and adds it to your approved fleet; until then it stays named.')
+            else:
+                # Nothing measured yet: a scan KEEPS a sighting without trusting it, and approve
+                # comes after that — the same two steps the CLI prints.
+                started = _started(f"scan · {it['key']}", "Scan")
+                acts = (started or _form("scan", it["key"], "Scan it — kept, not trusted",
+                                         extra='<input type="hidden" name="launch" value="1">')
+                        ) + f'<a class="btn" href="{_skip_url(it)}">Not now</a>'
+                note = ('A scan records what it declares and keeps that sighting without making it '
+                        'a baseline. Then review it and approve it here, or: mcpgawk approve '
+                        f'{_esc(it["name"])}')
+            eyebrow = f'1 OF {_eyebrow_n} · TRUST DECISION · APPEARED'
         elif it["kind"] == "unmeasured":
             head = f'{_esc(it["name"])} has never been measured.'
             who = ", ".join(it.get("clients") or [])
@@ -8865,9 +9464,11 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
             eyebrow = f'1 OF {_eyebrow_n} · COULD NOT VERIFY' + (f' · LAST TRY {_esc(_local_stamp(it["at"]))}' if it["at"] else '')
         elif it["kind"] == "unwatched":
             n_ap = it["approved"]
-            head = f'Nothing is re-checking your {n_ap} approved server{"s" if n_ap != 1 else ""}.'
-            sub = ('Monitoring is off. A server that changes after you approved it will not raise '
-                   'an alert until someone scans — the rug-pull case waits for a human to look.')
+            words = it.get("words") or "at a baseline"
+            head = f'Nothing is re-checking your {n_ap} server{"s" if n_ap != 1 else ""} {words}.'
+            sub = ('Monitoring is off. A server that changes after its baseline was recorded will '
+                   'not raise an alert until someone scans — the rug-pull case waits for a human '
+                   'to look.')
             evidence = ('<h2>State</h2><div class="ev"><div class="lbl">monitor not running</div>'
                         + (f'<div class="was"><b>last check</b> {_esc(_local_stamp(it["last_check"]))}</div>' if it["last_check"] else '<div class="was">no sweep recorded</div>')
                         + (f'<div class="was"><b>open alerts</b> {it["alerts"]}</div>' if it["alerts"] else '')
@@ -8920,10 +9521,11 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
                         f'<a class="btn" href="{_skip_url(it)}">Not now</a>')
                 note = 'Scan and discovery still cover its servers; the calls themselves are unchecked.'
             eyebrow = f'1 OF {_eyebrow_n} · UNHOOKED AGENT'
-        _kind_words = {"decision": "changed since you approved it", "signin": "needs your sign-in",
+        _kind_words = {"decision": "changed since its baseline", "signin": "needs your sign-in",
                        "finding": "has a finding to review", "unmeasured": "has never been measured",
                        "unverified": "could not be verified", "unwatched": "monitoring is off",
                        "unhooked": "has no check",
+                       "appeared": "appeared since your fleet approval",
                        "observed": "is called but never measured"}
         # THE TEASER USES THE SAME WORDS AS THE ITEM IT POINTS AT. "Next: plugin_figma_figma
         # needs your sign-in ›" sat under an item explaining that Figma will not let mcpgawk sign
@@ -8933,7 +9535,7 @@ def render_next(d: dict[str, Any], token: str = "", action: dict | None = None,
             _nxt_word = {"blocked_vendor": "cannot be signed into from here",
                          "set_aside": "is set aside by you",
                          "signed_in": "is signed in"}.get(
-                             (nxt.get("signin") or {}).get("state"), _nxt_word)
+                             str((nxt.get("signin") or {}).get("state") or ""), _nxt_word)
         nxt_html = (f'<a class="mono" href="{_skip_url(it)}">Next: {_esc(nxt["name"])} '
                     f'{_nxt_word} ›</a>'
                     if nxt else '<span class="mono">Last one in the queue</span>')
@@ -9263,7 +9865,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                                    "mute": f"mute · {_k}" if _k else "mute",
                                    "pin": f"pin · {_k}" if _k else "pin",
                                    }[act])
-            if act in ("scan", "verify", "login", "login-done"):
+            if act in ("scan", "verify", "login", "login-done", "login-backend"):
                 # `key` carries the server for a row action; absent = whole fleet. `launch=1` is
                 # sent only by the /next never-measured card, whose sentence is the consent to
                 # launch a local server once (run_scan).
@@ -9353,7 +9955,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                 # would be asked to mute its way past it. Not drawing the button is not enforcement.
                 from . import baseline as _bl
                 blocked = _bl.approval_blocked_reason()
-                if blocked and os.environ.get(_bl.APPROVE_OVERRIDE_ENV) != "1":
+                if blocked:
                     _ACTION.update(message=f"mute refused — {blocked}", rows=[], level="bad", at=_now())
                     self.send_response(303)
                     self.send_header("Location", _back)
@@ -9376,7 +9978,7 @@ def serve(port: int = 7718, open_browser: bool = True, log=print) -> int:
                 # same hole closed in the CLI on 2026-07-27, reopened by the GUI.
                 from . import baseline as _bl
                 blocked = _bl.approval_blocked_reason()
-                if blocked and os.environ.get(_bl.APPROVE_OVERRIDE_ENV) != "1":
+                if blocked:
                     _ACTION.update(message=f"approve refused — {blocked}", at=_now())
                     self.send_response(303)
                     self.send_header("Location", _back)

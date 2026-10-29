@@ -45,6 +45,18 @@ _WRITE_VERBS = (
     # `sign` were considered and REJECTED — each brought a false positive (a permission check, a
     # resend editor handshake, and Revolut's `get_trading_setup`).
     "login", "authenticate",
+    # D1 (2026-09-26): "trigger" and "replay" were considered and REJECTED. "trigger" is a noun in
+    # every automation server's reads ("Get a trigger by id"); "replay" would block session-replay
+    # reads in TS safe mode. resend's replay-webhook-event, which matched only via "does not
+    # schedule" before the negation rule below, is caught instead by "Queue" leading a sentence
+    # (_WRITE_SENTENCE, [FOUNDER 2026-09-26]).
+    # 2026-09-24: "launch", "translate" and "duplicate" were considered (three misses in the Laya
+    # evaluation's hand labels) and REJECTED — none is unambiguous in isolation ("launch date",
+    # "find duplicate contacts", a translate_text tool that only returns text), and classify.ts
+    # must carry every verb here as a NAME token, where each would make a read uncallable in safe
+    # mode. Three of the four tools they would catch declare readOnlyHint: false, which
+    # `_is_write` now reads; resend's duplicate-template is caught by its second sentence
+    # ("Creates a new draft copy", _WRITE_SENTENCE).
 )
 
 
@@ -78,6 +90,74 @@ _WRITE = re.compile(r"\b(" + "|".join(_WRITE_VERBS) + r")\b", re.I)
 _WRITE_LEADING = re.compile(
     r"^\W*(?:it\s+|this\s+tool\s+)?(" + "|".join(_third_person(v) for v in _WRITE_VERBS) + r")\b",
     re.I)
+
+# D1 (sweep 2026-09-25): `_WRITE` matches WORDS, and prose uses a write verb without describing a
+# write. openzeppelin's eight generators each end "Does not write to disk."; jina's blog search
+# mentions "technical write-ups". All counted as tools that can change data. Two prose shapes are
+# dropped, and ONLY in the description: a verb directly negated ("does not write", "never sends",
+# "cannot delete"), and a verb that starts a hyphen compound ("write-ups"). A verb that ENDS one
+# still counts: "soft-delete", "hard-delete", "bulk-update" and "auto-create" are writes. The NAME
+# keeps the bare pattern: hyphens separate words in names (`create-webhook`), so the compound rule
+# would blind every kebab-case tool.
+_NEGATED = re.compile(r"(?:\bnot|n't|\bnever|\bcannot|\bno\s+longer)\s+(?:\w+ly\s+)?$", re.I)
+
+# [FOUNDER 2026-09-26] Two words in the list are also a participle and a noun, and each shape is
+# dropped in the DESCRIPTION only (names keep "set_x" and "trade"; classify.ts, which reads only
+# names, is untouched). "set" followed by on/by/in/to/of is a participle: hood's resolve_text reads
+# "a text record ... set on a .hood name". "trade" after a/the/each, or ending "pre-", is a noun:
+# agentberg's query_network_brief reads "pre-trade consensus ... before entering a trade". Each
+# rests on ONE live description. MEASURED over 465 corpus + fixture tools: each flips exactly that
+# tool, and no write is lost. "Set the flag to true" still counts ("set" is followed by "the").
+_SET_PARTICIPLE = re.compile(r"^\s+(?:on|by|in|to|of)\b", re.I)
+_TRADE_NOUN = re.compile(r"(?:\b(?:a|the|each)\s+|pre-)$", re.I)
+
+# [FOUNDER 2026-09-26] _WRITE_LEADING looks only at the first word of the description, so a write
+# stated in a LATER sentence was missed: resend's duplicate-template ("Duplicate an existing email
+# template. Creates a new draft copy ...") and browserstack's addPercySnapshotCommands. The same
+# grammar argument holds per sentence — a third-person verb LEADS a sentence — so the -s form also
+# counts after ".", "!", "?", ":" (closing markdown/quote/bracket allowed: "**Purpose:** Queue") or
+# a newline. "Queue"/"Queues" counts ONLY in that position:
+# resend's replay-webhook-event reads "**Purpose:** Queue one more delivery"; bare "queue" is
+# a noun everywhere else ("items in the queue", `get_queue`), which is why it is NOT in
+# _WRITE_VERBS (that would put it in the bare prose pattern and, by the parity test, in
+# classify.ts as a name token). "runs" is left out here only because of revolut's grid_optimize
+# ("... no live orders. Runs a backtest ..."), a simulation — a one-example carve; at position 0
+# _WRITE_LEADING still accepts it. MEASURED over 465 tools through `_is_write`: 2 reads -> write
+# (duplicate-template, replay-webhook-event), 0 false. browserstack's addPercySnapshotCommands
+# also leads "Adds" but declares readOnlyHint: true, and a declared read wins — unchanged.
+# Accepted risk: a colon before a plural noun ("Returns: Updates since ...") would flag; 0 in corpus.
+_SENTENCE_START = r"(?:^|[.!?:][*_)\]\"']*\s+|\n\s*)\W*(?:it\s+|this\s+tool\s+)?"
+_WRITE_SENTENCE = re.compile(
+    _SENTENCE_START + r"(" + "|".join(_third_person(v) for v in _WRITE_VERBS if v != "run")
+    + r"|queues?)\b", re.I)
+
+
+# NAMES ARE TOKENISED, the way classify.ts reads them. `_WRITE` uses \b, and "_" is a word
+# character, so the name arm matched only kebab-case: `create_file`, `place_order` and
+# `placeOrder` with no description all read as reads (found 2026-09-26; the comment here claimed
+# "create_file" matched). Split on non-alphanumerics and lower->Upper boundaries, then look each
+# token up. "issue" is left out of NAME tokens for the reason classify.ts records: in a name it is
+# overwhelmingly the noun (`get_issue`, `list_issues`). MEASURED over 465 tools: see the commit.
+_NAME_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
+_NAME_WRITE_VERBS = frozenset(v for v in _WRITE_VERBS if v != "issue")
+
+
+def _name_is_write(name: str) -> bool:
+    return any(t.lower() in _NAME_WRITE_VERBS for t in _NAME_SPLIT.split(name) if t)
+
+
+def _describes_write(description: str) -> bool:
+    for mt in _WRITE.finditer(description):
+        before, after = description[:mt.start()], description[mt.end():]
+        if _NEGATED.search(before) or re.match(r"-[A-Za-z]", after):
+            continue
+        word = mt.group(1).lower()
+        if word == "set" and _SET_PARTICIPLE.match(after):
+            continue
+        if word == "trade" and _TRADE_NOUN.search(before):
+            continue
+        return True
+    return bool(_WRITE_SENTENCE.search(description))
 
 #: Parameter-name words that mean "the CALLER chooses a destination". This is the STRUCTURAL half
 #: of exfil detection and the stronger half: whoever controls that argument controls where data
@@ -169,6 +249,10 @@ class ToolMeasure:
     #: callers) must not be forced to restate it. Empty then means "not flagged, or nobody said" —
     #: which is exactly what the renderer treats as "no claim to make".
     exfil_basis: str = ""
+    #: K1 (2026-09-25): this tool's annotation block is treated as "nobody filled it in" — decided
+    #: per SERVER in measure(): more than one tool and every one carries the identical spec-default
+    #: block (kite's 22). One tool, or varied blocks, keep their declaration (PostHog's `exec`).
+    default_fill: bool = False
 
 
 @dataclass
@@ -199,6 +283,25 @@ def _count(enc, text: str) -> int:
     return len(enc.encode(text)) if enc is not None else max(1, len(text) // 4)
 
 
+_NON_TEXT_TYPES = {"boolean", "integer", "number"}
+
+
+def _cannot_hold_an_address(schema: Any) -> bool:
+    """A destination-NAMED parameter the schema types as a boolean or number (or an array of them)
+    cannot carry an address. D2 (2026-09-25): OpenZeppelin's `callback: boolean` and jina's
+    `return_url: boolean` were reported as caller-chosen destinations. Untyped or string-typed
+    parameters keep today's reading — the fail-safe direction."""
+    if not isinstance(schema, dict):
+        return False
+    t = schema.get("type")
+    types = set(t) if isinstance(t, list) else {t}
+    if t == "array":
+        inner = (schema.get("items") or {}).get("type") if isinstance(schema.get("items"), dict) else None
+        types = set(inner) if isinstance(inner, list) else {inner}
+    types.discard("null")                    # a nullable boolean is still not an address
+    return bool(types) and None not in types and types <= _NON_TEXT_TYPES
+
+
 def _exfil_basis(tool: dict[str, Any], ann: dict[str, Any] | None = None) -> str:
     """WHY this tool was flagged, in the product's own words. `""` means it was not.
 
@@ -225,8 +328,8 @@ def _exfil_basis(tool: dict[str, Any], ann: dict[str, Any] | None = None) -> str
         return ""
     # Parameter first: it is the strongest evidence, so it should be the reported reason when
     # several arms fire (`add_watermark` has an `image_url` AND the word "http" in its prose).
-    for k in ((tool.get("inputSchema") or {}).get("properties") or {}):
-        if _is_destination_param(k):
+    for k, schema in ((tool.get("inputSchema") or {}).get("properties") or {}).items():
+        if _is_destination_param(k) and not _cannot_hold_an_address(schema):
             return f"param:{k}"
     # THE TOOL'S OWN NAME NAMES A DESTINATION. `fetch_url` is not a chance word in prose — the
     # tool advertises what it does in its identifier, and a schema-less tool would otherwise be
@@ -318,18 +421,45 @@ def is_default_fill(ann: dict[str, Any] | None) -> bool:
     return {k: v for k, v in ann.items() if k != "title"} == _MCP_DEFAULT_HINTS
 
 
-def _is_write(tool: dict[str, Any], ann: dict[str, Any]) -> bool:
-    if is_default_fill(ann):                 # a struct nobody filled in declares nothing; fall through to the verbs
+# Code execution is the widest write there is. A PAIR — execute-verb next to a code object — because
+# "evaluate" alone is ordinary read-only prose ("Evaluates whether…"). Separators include `_` so
+# snake_case names match (`\b` does not split `run_shell_command`). Found 2026-09-24: skydock's
+# `evaluate_python_expression` (a bare eval()) counted as neither write nor exfil. MEASURED before
+# adding: fires on 0 of the 346 recorded tools in tests/corpus/detectors.
+_CODE_EXEC = re.compile(
+    r"(?:^|[\W_])(?:eval|evaluate|evaluates|exec|execute|executes|run|runs)[\W_]+(?:\w+[\W_]+)?"
+    r"(?:python|code|expression|script|shell|command|cmd|sql|javascript|js|bash)(?:$|[\W_])", re.I)
+
+
+def _is_write(tool: dict[str, Any], ann: dict[str, Any], demote: bool | None = None) -> bool:
+    # `demote` is measure()'s server-level decision; None keeps the per-block rule for other callers.
+    if (is_default_fill(ann) if demote is None else demote):                 # a struct nobody filled in declares nothing; fall through to the verbs
         ann = {}                             # LOCAL rebind only — the stored tuple stays raw for drift and the panel
     if ann.get("destructiveHint") is True:   # a declared-destructive tool mutates, even if the verb heuristic misses it
         return True                          # (e.g. Emergent's `pause_job` — "pause" isn't a write-verb)
+    # Before readOnlyHint on purpose: a tool that runs arbitrary code cannot honestly be read-only.
+    if _CODE_EXEC.search(tool.get("name", "")) or _CODE_EXEC.search(tool.get("description") or ""):
+        return True
     if ann.get("readOnlyHint") is True:      # declared read-only wins over the verb heuristic
         return False
+    # An EXPLICIT "not read-only" is the server saying it writes; it only ever moves the verdict
+    # towards caution, like destructiveHint above. Default-fill blocks were demoted to {} first, so
+    # kite's all-defaults tuple cannot reach here. MEASURED 2026-09-24: flags 10 more corpus tools,
+    # 9 plainly writes (create/run/restore/start) and takeAppScreenshot, which starts a device session.
+    if ann.get("readOnlyHint") is False:
+        return True
+    # D16 (2026-09-25): the spec says destructiveHint and idempotentHint are "meaningful only when
+    # readOnlyHint == false" — a server that declares either, and leaves readOnlyHint out, is
+    # describing a tool that writes. tandem declares them on its six cache/index-mutating tools and
+    # readOnlyHint: true on its seven reads. MEASURED: 0 of 346 corpus tools change.
+    if "readOnlyHint" not in ann and ("destructiveHint" in ann or "idempotentHint" in ann):
+        return True
     description = (tool.get("description") or "").strip()
-    text = tool.get("name", "") + " " + description
-    # Bare verb anywhere ("create_file", "will delete the row"), OR a third-person verb leading the
-    # description ("Creates a file") — see _WRITE_LEADING for why the second one is anchored.
-    return bool(_WRITE.search(text)) or bool(_WRITE_LEADING.match(description))
+    # A verb token in the name ("create_file", "placeOrder", "create-webhook") or in the prose
+    # ("will delete the row", minus the negated and compound uses — see _describes_write), OR a
+    # third-person verb leading the description ("Creates a file") — see _WRITE_LEADING.
+    return (_name_is_write(tool.get("name", "")) or _describes_write(description)
+            or bool(_WRITE_LEADING.match(description)))
 
 
 def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -> Measurement:
@@ -337,6 +467,12 @@ def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -
         enc, tokenizer_name = _encoder()
     tools: list[ToolMeasure] = []
     total = 0
+    # K1: [FOUNDER 2026-09-11] rule, applied as it was reasoned — across a server's tools. The
+    # reason recorded was kite: cancel_order and get_profile annotated IDENTICALLY, so the block
+    # describes neither. A lone tool, or tools with varied blocks, gives no such evidence; PostHog
+    # deliberately sends the default values on its single `exec`. classify.ts already exempts
+    # single-tool servers. MEASURED: 0 of 346 corpus tools change; kite stays demoted 22 of 22.
+    uniform = len(snap.tools) > 1 and all(is_default_fill(t.get("annotations") or {}) for t in snap.tools)
     for t in snap.tools:
         # Tokenise exactly what a model's context would carry for this tool.
         blob = json.dumps({k: t.get(k) for k in ("name", "description", "inputSchema", "annotations")
@@ -347,8 +483,10 @@ def measure(snap: ServerSnapshot, enc=None, tokenizer_name: str | None = None) -
         props = ((t.get("inputSchema") or {}).get("properties") or {})
         tools.append(ToolMeasure(
             name=t.get("name", "?"), tokens=tk,
-            write=_is_write(t, ann), exfil_capable=_exfil_capable(t, ann),
+            write=_is_write(t, ann, demote=uniform and is_default_fill(ann)),
+            exfil_capable=_exfil_capable(t, ann),
             exfil_basis=_exfil_basis(t, ann), annotations=ann,
+            default_fill=uniform and is_default_fill(ann),
             param_count=len(props),
             description_words=len((t.get("description") or "").split())))
     # Integrity pin over the WHOLE tool surface — name + description + canonical input schema +

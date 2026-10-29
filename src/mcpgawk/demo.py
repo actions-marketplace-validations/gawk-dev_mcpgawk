@@ -163,7 +163,9 @@ class _Sandbox:
         self.mode.write_text(mode)
 
     def env(self) -> dict[str, str]:
-        env = dict(os.environ)
+        # The sandbox's own children are not the caller's agent: the CI hatch below no longer
+        # waives an agent-session marker, and the demo must still run from inside Claude Code.
+        env = {k: v for k, v in os.environ.items() if k not in history.AGENT_ENV_MARKERS}
         env.update({
             "HOME": str(self.home),
             history.STORE_ENV: str(self.history),
@@ -171,6 +173,7 @@ class _Sandbox:
             "GAWK_BEHAVIOUR_PROFILE": str(self.state / "behaviour.json"),
             "GAWK_BEHAVIOUR": str(self.state / "behaviour.json"),   # the guard hook's reader
             "GAWK_OAUTH_STORE": str(self.state / "oauth"),
+            "GAWK_OAUTH_KEY_BACKEND": "file",      # a throwaway sandbox never touches the Keychain
             "MCPGAWK_AUTH_NEEDED": str(self.state / "auth-needed.json"),
             "GAWK_CONFIG": str(self.state / "config.json"),
             "MCPGAWK_SPOOL": str(self.state / "spool"),

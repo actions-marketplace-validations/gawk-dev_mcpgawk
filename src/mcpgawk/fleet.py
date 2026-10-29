@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from . import configcheck
+from .signals import is_instruction_finding
 from .ambient import detect_ambient, summarize
 from .redact import redact_url
 from .probe import _missing_program
@@ -32,11 +33,16 @@ from .probe import _missing_program
 #: findings, because an unscanned server is an unknown, and an unknown outranks a known risk.
 #: FAILED sits above UNREACHABLE on purpose: both block a scan, but a server that ran and printed
 #: a reason has a fix the user can act on today, while "nothing answered" still needs diagnosing.
-STATES = ("AUTH", "FAILED", "TIMED-OUT", "UNREACHABLE", "SKIPPED", "NOT-SCANNABLE", "REVIEW",
-          "INCOMPLETE", "CLEAN")
+#: NOT-MCP (2026-09-26, FOUNDER "add NOT-MCP"): something answered, and it is not MCP — a docs page,
+#: a package URL, a firewall's refusal. It sat under UNREACHABLE, the word `scan` dropped in T1 because
+#: it is false when the endpoint answered. It follows UNREACHABLE: both block a scan, and the fix here
+#: (point the entry at the real endpoint) is one the user can make without diagnosing anything.
+STATES = ("AUTH", "FAILED", "TIMED-OUT", "UNREACHABLE", "NOT-MCP", "SKIPPED", "NOT-SCANNABLE",
+          "REVIEW", "INCOMPLETE", "CLEAN")
 
 _MARK = {
-    "AUTH": "●", "FAILED": "●", "TIMED-OUT": "●", "UNREACHABLE": "●", "SKIPPED": "○",
+    "AUTH": "●", "FAILED": "●", "TIMED-OUT": "●", "UNREACHABLE": "●", "NOT-MCP": "●",
+    "SKIPPED": "○",
     "NOT-SCANNABLE": "◌", "REVIEW": "●", "INCOMPLETE": "●", "CLEAN": "●",
 }
 
@@ -57,6 +63,10 @@ class FleetRow:
     # from the user's own config (an `env` API key), so it is never in the default fleet-json — see
     # `--with-spec`, which only the local web UI requests, in-process, over loopback.
     spec: dict[str, Any] | None = None
+    # SKIPPED by refusal (the registry says its package does not exist), not by withheld consent —
+    # so the "re-run with --yes" next step, which would not launch it, is never offered for it.
+    # Terminal-only: not part of the fleet-json payload (its `detail` already says why).
+    refused: bool = False
 
     @property
     def needs_auth(self) -> bool:
@@ -82,10 +92,31 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
     if x.get("is_failure"):
         if x.get("error_kind") == "auth-required":
             return "AUTH", "needs credentials — not scanned"
+        if x.get("error_kind") == "sign-in-failed":
+            # Not the server's fault until shown otherwise (RCA RC3): say so, and where to look.
+            return "AUTH", "sign-in failed — may be mcpgawk's fault; `mcpgawk report` has the details"
+        if x.get("error_kind") == "access-denied":
+            return "AUTH", "signed in, but the server refused this account (HTTP 403) — see its reason"
+        if x.get("error_kind") == "server-error":
+            # An existing state on purpose: the VS Code FleetState union is closed.
+            return "UNREACHABLE", "the server is answering with errors (HTTP 5xx) — try later"
+        if x.get("error_kind") == "sign-in-incomplete":
+            return "AUTH", "sign-in not completed — run it again and approve in the browser"
+        if x.get("error_kind") == "login-unreadable":
+            return "AUTH", "stored sign-in can't be decrypted (its key changed) — sign in again"
+        if x.get("error_kind") == "registration-refused":
+            return "AUTH", "refuses automatic registration — sign in with --oauth-client-id"
+        if x.get("error_kind") == "not-launched":
+            # SKIPPED, not a new state: STATES is pinned by the IDE extension (FLEET_SCHEMA). It WAS
+            # skipped — deliberately — and the detail says why, which --yes does not change.
+            sc = x.get("supply_chain") or {}
+            registry = {"npm": "npm", "pypi": "PyPI"}.get(sc.get("ecosystem"), "its registry")
+            return "SKIPPED", (f"not launched — `{sc.get('package', '?')}` is not on {registry} "
+                               f"(hallucinated or not yet registered)")
         if x.get("error_kind") == "misconfigured":
             return "UNREACHABLE", "config entry is not usable"
         if x.get("error_kind") == "not-an-mcp-endpoint":
-            return "UNREACHABLE", "responds, but does not speak MCP"
+            return "NOT-MCP", "responds, but does not speak MCP"
         if x.get("error_kind") == "timed-out":
             # The beta page's "sits there doing nothing", named. It is NOT "no endpoint found":
             # the server is there, it took the connection, and it never spoke.
@@ -101,6 +132,8 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
             # so anything that later appears at that path is executed without being asked about
             # again. That is a standing invitation, not a dead link.
             return "UNREACHABLE", "its program no longer exists — still configured, so anything at that path would run"
+        if x.get("error_kind") == "host-not-found":
+            return "UNREACHABLE", "its host name does not resolve — check the spelling, DNS or VPN"
         if x.get("error_kind") == "nothing-listening":
             # The loopback twin of command-missing, and the worse one: a missing program needs a
             # file planted at a known path before anything runs; a free loopback port needs only a
@@ -116,6 +149,11 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
         # message and a redactor that does not fire on paths. probe.py already CAPTURES it.
         return "UNREACHABLE", "no MCP endpoint found"
 
+    if n == 0 and not x.get("prompt_count") and not x.get("resource_count"):
+        # Zoho, 2026-09-24: signed in, exposed nothing, rendered CLEAN. Nothing measured is not a
+        # clean bill of health; the usual cause is the server's own settings (no tools enabled).
+        return "REVIEW", "exposes no tools — nothing to measure; check the server's own settings"
+
     flags = x.get("risk_flags") or {}
     ts = x.get("trust_surface") or {}
     bits = [f"{n} tool{'s' if n != 1 else ''}", f"{cost:,} tok"]
@@ -128,7 +166,7 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
     has_dispatch = any((s.get("kind") or "").startswith("dispatch:")
                        for s in (x.get("bounded_signals") or []))
     injections = [s for s in (x.get("bounded_signals") or [])
-                  if (s.get("kind") or "").startswith("injection:")]
+                  if is_instruction_finding(s.get("kind"))]
     if injections:
         bits.append(f"⚠ {len(injections)} injection finding{'s' if len(injections) != 1 else ''}")
     secrets = [s for s in (x.get("bounded_signals") or [])
@@ -147,7 +185,9 @@ def state_of(label: dict[str, Any]) -> tuple[str, str]:
     detail = " · ".join(bits)
     if has_dispatch:
         return "INCOMPLETE", detail + " · hides its real catalog"
-    if injections or secrets or risky_config or flags.get("high_reach") or flags.get("heavy"):
+    # `heavy` alone is a raw size fact; a REVIEW needs the cost to be a concern (D9, 2026-09-25).
+    from .label import is_cost_concern
+    if injections or secrets or risky_config or flags.get("high_reach") or is_cost_concern(x):
         return "REVIEW", detail
     return "CLEAN", detail
 
@@ -215,7 +255,8 @@ def build_rows(labels: list[dict[str, Any]], entries: dict[str, dict[str, Any]] 
         entry = entries.get(lab["name"]) or {}
         rows.append(FleetRow(name=lab["name"], state=state, detail=detail, url=entry.get("url"),
                              clients=tuple(entry.get("_clients") or ()), names=dict(entry.get("_names") or {}),
-                             spec=_spec_of(entry) if with_spec else None))
+                             spec=_spec_of(entry) if with_spec else None,
+                             refused=lab["x-mcpgawk"].get("error_kind") == "not-launched"))
     for n, e in (skipped or []):
         row = skipped_row(n, e)
         if with_spec:
@@ -336,8 +377,12 @@ def render_fleet(rows: list[FleetRow], scanned_at: str | None = None) -> str:
         # follow-up that is actually true for the run it's in.
         out.append(f"  {n_auth} {'needs' if n_auth == 1 else 'need'} credentials before "
                    f"{'it' if n_auth == 1 else 'they'} can be scanned.")
-    elif counts["SKIPPED"]:
+    elif any(r.state == "SKIPPED" and not r.refused for r in rows):
         out.append("  Local servers were not launched. Re-run with --yes to scan them too.")
+    elif counts["SKIPPED"]:
+        # Only refusals are skipped: --yes would not launch them, so never suggest it.
+        out.append("  A server names a package its registry does not have — it was not launched. "
+                   "Check the name before you trust it.")
     elif counts["REVIEW"] or counts["INCOMPLETE"]:
         out.append("  Look closer at one:  mcpgawk scan --only <name> --detail")
     return "\n".join(out)
@@ -353,7 +398,8 @@ def render_fleet(rows: list[FleetRow], scanned_at: str | None = None) -> str:
 #: shipping new states under the old number walked around it. Bump whenever the payload gains
 #: anything an older client would have to understand — a new state, a renamed field, a changed
 #: meaning. Purely additive fields a client can ignore (`names`) do not need it.
-FLEET_SCHEMA = "mcpgawk.fleet/2"
+#: Bumped to /3 on 2026-09-26 when NOT-MCP joined STATES.
+FLEET_SCHEMA = "mcpgawk.fleet/3"
 
 
 def to_json(rows: list[FleetRow]) -> dict[str, Any]:

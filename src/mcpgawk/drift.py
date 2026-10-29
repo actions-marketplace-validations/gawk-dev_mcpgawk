@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .measure import Measurement
+from .measure import _MCP_DEFAULT_HINTS, Measurement
 from .probe import ServerSnapshot
 from .redact import redact
 
@@ -186,7 +186,7 @@ def signals_for_items(kind: str, items: Any) -> dict[str, list[str]]:
     Same contract as `_item_signals`: only non-empty entries, so a missing KEY means clean while a
     missing MAP means nobody looked.
     """
-    from .signals import _scan_text     # local import: keeps drift's module graph acyclic
+    from .signals import _scan_params, _scan_text   # local import: keeps drift's module graph acyclic
 
     out: dict[str, list[str]] = {}
     for it in items or ():
@@ -194,7 +194,9 @@ def signals_for_items(kind: str, items: Any) -> dict[str, list[str]]:
             continue
         ident = it.get("name") or it.get("uri") or "?"
         key = f"{kind}.{ident}"
-        if found := _scan_text(it.get("description") or "", key):
+        # Parameters too: an exfil-by-argument rug pull changes the SCHEMA, and judging only the
+        # prose let it through as "nothing matched a known injection pattern".
+        if found := _scan_text(it.get("description") or "", key) + _scan_params(it, key):
             out[key] = sorted({f.kind for f in found})
     return out
 
@@ -287,6 +289,11 @@ class DriftReport:
     #: NOW, so this run cannot claim (or clear) drift on them — and must say so rather than
     #: reporting every prompt as newly "added".
     baseline_extended: bool = False
+    #: How the baseline being compared against was set — `history.baseline_origin`: "approve",
+    #: "first-sighting", or None (unknown, older than the field). Set by the caller that holds the
+    #: store; `compare` sees only the two records. Decides whether the headline may say "you
+    #: approved it".
+    baseline_origin: str | None = None
     #: `{kind}.{name}` -> (before, after) redacted description text, for the items in `changed`.
     #: Empty when either record predates text storage (ADR-0012) — the diff degrades to the hash
     #: verdict rather than inventing content.
@@ -445,22 +452,115 @@ class DriftReport:
         Not every hint change matters. Losing `readOnlyHint` or gaining `destructiveHint` does: the
         tool previously told the agent it only reads, and now it does not — a structural change in
         what the agent will let it do, not a wording tweak. This is a comparison of declared
-        capability, not a text heuristic."""
+        capability, not a text heuristic.
+
+        An ABSENT hint means the spec default (`_MCP_DEFAULT_HINTS`), not "false": unset
+        openWorldHint/destructiveHint already mean true. Compared raw, a server that merely wrote
+        its defaults down (Tently 0.1.2, 2026-10-26: unset -> openWorldHint true) was refused, and
+        `destructiveHint: false -> unset` — a real gain, required by measure.py — was silent.
+        Only absent/None takes the default; any other value is compared exactly as declared."""
         before, after = self.annos.get(key, ({}, {}))
+
+        def declared(ann: dict, hint: str) -> Any:
+            value = ann.get(hint) if isinstance(ann, dict) else None
+            return _MCP_DEFAULT_HINTS[hint] if value is None else value
+
         out = []
         for hint in ("readOnlyHint", "idempotentHint"):
-            if before.get(hint) is True and after.get(hint) is not True:
+            if declared(before, hint) is True and declared(after, hint) is not True:
                 out.append(f"lost {hint}")
         for hint in ("destructiveHint", "openWorldHint"):
-            if before.get(hint) is not True and after.get(hint) is True:
+            if declared(before, hint) is not True and declared(after, hint) is True:
                 out.append(f"gained {hint}")
         return out
+
+    def hint_moves(self, key: str) -> list[tuple[str, str, str]]:
+        """Each annotation that moved, as `(name, was, now)` display strings — the was/now an
+        approver needs. "tool annotations CHANGED" alone made a server that merely wrote its
+        defaults down (Tently 0.1.2, 2026-10-26) look like it relabelled itself, with nothing to
+        read. An absent hint is shown with the spec default it stands for."""
+        before, after = self.annos.get(key, ({}, {}))
+        before = before if isinstance(before, dict) else {}
+        after = after if isinstance(after, dict) else {}
+
+        def shown(ann: dict, name: str) -> str:
+            if ann.get(name) is None:
+                default = _MCP_DEFAULT_HINTS.get(name)
+                return ("not set" if default is None
+                        else f"not set (means {json.dumps(default)})")
+            return json.dumps(ann[name], ensure_ascii=False)
+
+        hints = list(_MCP_DEFAULT_HINTS)
+        names = hints + sorted((set(before) | set(after)) - set(hints))
+        return [(n, shown(before, n), shown(after, n)) for n in names
+                if before.get(n) != after.get(n) or (n in before) != (n in after)]
+
+    def hint_summary(self, key: str) -> str:
+        """One sentence for the annotation row: what grew, or that nothing did."""
+        grew = self.escalations(key)
+        if grew:
+            return f"now declares more power ({', '.join(grew)})"
+        return "safety hints changed — nothing widened"
+
+    def permission_changes(self, key: str) -> list[str]:
+        """What this item can now do that the person never approved: an annotation escalation, a
+        new parameter that names a destination, or a new parameter that names code to execute.
+        The guard REFUSES on these (FOUNDER 2026-10-06, "Block permission growth"); every other
+        schema change waits for sign-off without blocking (FOUNDER 2026-08-15). One rule, read by
+        scan and by the guard projection."""
+        return (self.escalations(key)
+                + [f"new destination parameter {p}" for p in self.gained_params(key)
+                   if destination_param(p)]
+                + [f"new execution parameter {p}" for p in self.gained_params(key)
+                   if execution_param(p)])
 
     def of_kind(self, kind: str) -> dict[str, list[str]]:
         """Split the typed `{kind}.{name}` keys back out for rendering."""
         pre = f"{kind}."
         return {field: [k[len(pre):] for k in getattr(self, field) if k.startswith(pre)]
                 for field in ("added", "removed", "changed")}
+
+
+#: Name tokens that make a NEW parameter a destination: somewhere the call can send, write or
+#: upload to. Measured on every parameter the top servers added across 86 real releases (live probe,
+#: 2026-10-04): flags exactly `url`, `filePath`, `extraHttpHeaders`, `filePaths` — each a real new
+#: capability — and none of `target`, `pageId`, `connectionId`. `output` is deliberately absent
+#: (`outputFormat` is not a destination). Pinned by tests/test_guard_permission_growth.py.
+DESTINATION_TOKENS = frozenset({
+    "url", "urls", "uri", "endpoint", "webhook", "callback", "host", "hostname", "domain",
+    "recipient", "recipients", "to", "cc", "bcc", "email", "emails", "forward", "destination",
+    "dest", "sink", "upload", "save", "path", "paths", "filepath", "filepaths", "file", "files",
+    "dir", "directory", "folder", "header", "headers"})
+
+
+def destination_param(name: str) -> bool:
+    """True when a parameter's NAME says it is somewhere the call sends, writes or uploads to."""
+    if not isinstance(name, str):
+        return False
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower()
+    return bool({t for t in re.split(r"[^a-z0-9]+", snake) if t} & DESTINATION_TOKENS)
+
+
+#: Name tokens that make a NEW parameter an execution surface: the call can now run a command,
+#: script or query the caller supplies. Borrowed as a pattern from Yashigani's EXEC class
+#: (docs/research-yashigani-2026-10-08.md), minus `query` and `code`, which would fire on every
+#: search and docs tool. Measured 2026-10-08 on all 184 real updates (107 + Nueravi's 77): zero
+#: of the 99 parameters added to existing tools match, so it adds no false refusals.
+EXECUTION_TOKENS = frozenset({
+    "command", "commands", "cmd", "script", "scripts", "shell", "sql", "exec", "eval"})
+_REFERENCE_SUFFIXES = frozenset({"id", "ids", "name", "names", "type", "types", "index"})
+
+
+def execution_param(name: str) -> bool:
+    """True when a parameter's NAME says the call executes something the caller supplies."""
+    if not isinstance(name, str):
+        return False
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower()
+    tokens = [t for t in re.split(r"[^a-z0-9]+", snake) if t]
+    # `commandId`, `scriptName`, `sqlType` refer to a command; they do not carry one to run.
+    if tokens and tokens[-1] in _REFERENCE_SUFFIXES:
+        return False
+    return bool(set(tokens) & EXECUTION_TOKENS)
 
 
 def _pin_basis_of(rec: dict[str, Any]) -> int | None:
@@ -834,18 +934,24 @@ def _excerpt(text: str) -> str:
 
 def render_headline(names: list[str], hostile: list[str] | None = None,
                     injected: list[str] | None = None,
-                    escalated: list[str] | None = None) -> str:
+                    escalated: list[str] | None = None,
+                    origins: "dict[str, str | None] | None" = None) -> str:
     """The first thing a fleet scan says when something changed.
 
     Drift used to print AFTER the fleet list, under a wall of token counts — so the one finding a
     general-purpose agent cannot produce was the last thing the reader reached, on the path almost
     every user takes (any machine with more than one server). Cost is a commodity measurement; a
     server changing after you approved it is not. It leads.
+
+    `origins` maps each name to `history.baseline_origin`; "since you approved" is said only when a
+    person approved every baseline (`history.since_words`). Omitted, every baseline is taken as
+    recorded before origins were — the wording such a baseline has always had.
     """
+    from .history import since_words
     n = len(names)
     what = "server has" if n == 1 else "servers have"
-    them = "it" if n == 1 else "them"
-    head = f"  ⚠  {n} {what} CHANGED since you approved {them}: {', '.join(names)}"
+    since = since_words([(origins or {}).get(x) for x in names])
+    head = f"  ⚠  {n} {what} CHANGED {since}: {', '.join(names)}"
     if hostile:
         # Not all change is equal, and the headline must not flatten them. A rewrite that added an
         # injection signature is the thing this product exists to catch; saying it in the same voice
@@ -863,9 +969,18 @@ def render_headline(names: list[str], hostile: list[str] | None = None,
                          f"like an ATTACK.")
             lines.append("     Do NOT approve until you have read the inserted text below.")
         if esc:
+            # "than you approved" only when a person approved THESE servers' baselines — the
+            # escalated ones, not the fleet-wide mix `since` was built from. supademo 2026-10-09:
+            # "DECLARES MORE POWER than you approved" one line above "you have not approved this
+            # server yet".
+            from .history import vouched
+            esc_v = origins is None or vouched([origins.get(x) for x in esc])
+            than = ("you approved" if esc_v
+                    else ("its baseline" if len(esc) == 1 else "their baselines"))
             lines.append((f"  ⛔ {n} {what} CHANGED, and " if not inj else "     Also: ")
-                         + f"{', '.join(esc)} now DECLARES MORE POWER than you approved "
-                         f"(a tool marked itself destructive or open-world).")
+                         + f"{', '.join(esc)} now DECLARES MORE POWER than {than} "
+                         f"(a tool stopped declaring read-only or idempotent, or started "
+                         f"declaring destructive or open-world).")
             lines.append("     Do NOT approve until you have read what it gained below.")
         return "\n".join(lines)
     return (f"{head}\n"
@@ -905,28 +1020,28 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
                 f"        Until then this server is NOT being compared against anything.")
     when = ago(r.prev_at)
     approval = head is None      # the default caller compares "your approval" with "now"
-    if head is not None:
-        pass
-    elif when:
-        # `prev_at` is the APPROVED sighting's time — the age of the baseline, not of the change.
-        # "changed 19 days ago" read as if the change were dated (2026-09-03); it is not. Say
-        # what the timestamp is.
-        head = f"    ⟳ DRIFT on {name} — changed since you approved it {when}:"
-    elif r.prev_at:
-        head = f"    ⟳ DRIFT on {name} — changed since {r.prev_at}, after you approved it:"
-    else:
-        head = f"    ⟳ DRIFT on {name} — changed after you approved it:"
+    if head is None:
+        # ONE sentence, from `history.changed_head`, shared with the panel's /next headline: who
+        # approved this baseline is decided by `baseline_origin`, not by which renderer is
+        # printing. `prev_at` is the APPROVED sighting's time — the age of the baseline, not of
+        # the change ("changed 19 days ago" read as if the change were dated, 2026-09-03).
+        from .history import changed_head
+        head = f"    ⟳ DRIFT on {name} — {changed_head(r.baseline_origin, when or r.prev_at)}:"
     lines = [head]
     for kind in ITEM_KINDS:
         split = r.of_kind(kind)
         if split["changed"]:
             # "(rug-pull signature)" is an ACCUSATION, so it is made only where there is evidence
-            # for it — `r.hostile`, the same set that earns the per-line INJECTION SIGNATURE mark
+            # for it — `r.injected`, the same set that earns the per-line INJECTION SIGNATURE mark
             # below. Printing it on every rewrite meant a typo fix and a poisoning attempt arrived
             # in identical words, which is how a team learns to run `approve --all` without reading.
             # That is the failure this whole module exists to prevent (see `_with_severity`).
+            # NOT `r.hostile`: that is injected ∪ escalated, and an annotation flip is not text.
+            # supademo 2026-10-09: move_demos gained openWorldHint and nothing else, and this line
+            # called it a rug-pull while the headline (3f219d76) had already learned to tell the
+            # two apart. The escalation has its own words on the annotations line below.
             tag = (" (rug-pull signature)"
-                   if any(f"{kind}.{s}" in r.hostile for s in split["changed"]) else "")
+                   if any(f"{kind}.{s}" in r.injected for s in split["changed"]) else "")
             lines.append(f"        ! {kind} description CHANGED{tag}: "
                          f"{', '.join(split['changed'])}")
             # Show WHAT it gained. "helper's description changed" tells a user to go and look;
@@ -936,7 +1051,7 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
                 key = f"{kind}.{short}"
                 gained, lost = r.insertion(key), r.deletion(key)
                 if gained:
-                    mark = "  ← INJECTION SIGNATURE" if key in r.hostile else ""
+                    mark = "  ← INJECTION SIGNATURE" if key in r.injected else ""
                     lines.append(f"            {short} gained: {_excerpt(gained)}{mark}")
                 if lost:
                     # A deleted safety caveat steers the model as effectively as an added
@@ -967,8 +1082,11 @@ def render(name: str, r: DriftReport, head: str | None = None) -> str:
         for key in [k for k in r.annotation_changed if k.startswith(f"{kind}.")]:
             short = key[len(kind) + 1:]
             esc = r.escalations(key)
-            mark = f" ({', '.join(esc)})  ← CAPABILITY ESCALATION" if esc else ""
+            mark = (f" ({', '.join(esc)})  ← CAPABILITY ESCALATION" if esc
+                    else " — nothing widened")
             lines.append(f"        ! {kind} annotations CHANGED: {short}{mark}")
+            for name, was, now in r.hint_moves(key):
+                lines.append(f"            {name}: {was} → {now}")
         if split["added"]:
             lines.append(f"        + {_KIND_LABEL[kind]} added: {', '.join(split['added'])}")
         if split["removed"]:

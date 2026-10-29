@@ -9,7 +9,7 @@ If you find a security issue **in mcpgawk itself** (e.g. a way it could leak inv
 with credentials, or execute untrusted content), please report it privately rather than opening a public issue:
 
 - Open a [GitHub security advisory](../../security/advisories/new), or
-- email **security@gawk.dev**.
+- email **hello@nativerse-ventures.com** with "security" in the subject.
 
 Please include: what you did, what you expected, what happened, and a minimal reproduction. We aim to
 acknowledge within a few days.

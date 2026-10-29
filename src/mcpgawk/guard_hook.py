@@ -20,9 +20,11 @@ WHAT IT DECIDES, and — just as important — what it refuses to decide:
     This is the rug-pull, caught at the moment it matters.
   * A tool ABSENT from an otherwise-approved server → **deny**. A tool that appeared after
     approval is exactly the shape a malicious update takes.
-  * A server with NO approved baseline → **defer**, always. "Never approved" is not "violated":
-    blocking here would break every tool call on a machine that has simply never run
+  * A server with NO approved baseline → **defer** by default. "Never approved" is not
+    "violated": blocking here would break every tool call on a machine that has simply never run
     `mcpgawk approve`, which is most machines. Trust-on-first-use is scan's job, not the guard's.
+    In STRICT mode (`mcpgawk guard install --strict`, carried in the projection) → **deny**: the
+    person chose to refuse anything they never approved, including a server planted in a config.
   * Anything we cannot parse or read → **defer, loudly** on stderr. A security tool that bricks
     an agent session because its own baseline file was corrupt has done more harm than the drift
     it was watching for.
@@ -44,6 +46,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -270,6 +273,24 @@ def _approved_from_projection(server: str,
     return (dict(tools) if isinstance(tools, dict) else None), note
 
 
+def projected_evidence(server: str, store_path: Path) -> dict[str, tuple]:
+    """`{tool: (permission_changes, reverted)}` for one server, from the SAME projection row the hook
+    judges by — for the paid gateway, so it refuses what the hook refuses (permission growth since
+    approval, and the latch). Empty when there is no row; never raises."""
+    try:
+        record, _note = _record_from_projection(server, store_path)
+    except Exception:                               # noqa: BLE001 — evidence is optional, never a crash
+        return {}
+    if not isinstance(record, dict) or not isinstance(record.get("tools"), dict):
+        return {}
+    out: dict[str, tuple] = {}
+    for tool in record["tools"]:
+        _a, _p, _s, _at, grown, reverted = _row_evidence(record, tool)
+        if grown or reverted:
+            out[tool] = (grown, reverted)
+    return out
+
+
 def tools_comparable(server: str, store_path: Path) -> bool:
     """Whether this server's approved per-tool hashes may be compared with hashes WE compute.
 
@@ -289,16 +310,118 @@ def tools_comparable(server: str, store_path: Path) -> bool:
     return "seen_not_compared" not in record
 
 
+def _strict(store_path: Path) -> bool:
+    """Whether the projection says the guard is in strict mode. Read only when a call has no
+    baseline, so the common path pays nothing for it. Unreadable → False: the projection reader
+    has already said why it is deferring."""
+    try:
+        proj = projection_path(store_path)
+        raw = json.loads(proj.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    guard = raw.get("guard") if isinstance(raw, dict) else None
+    return isinstance(guard, dict) and guard.get("strict") is True
+
+
 def _record_from_projection(server: str,
                             store_path: Path) -> tuple[dict | None, str | None]:
+    """`(approved record, note)` — the public-facing half of `_lookup`, kept with this signature so
+    `approved_for` / `approved_for_detail` / `tools_comparable` (the paid gateway's contract) are
+    unchanged. The strict-mode refusal flag and the full candidate set are only used by `_decide`."""
+    # The gateway names servers by its own config: raw names, never an agent's rewrite.
+    record, note, _refuse, others = _lookup(server, store_path, rewritten=False)
+    if record is None and len(others) == 1:
+        # The gateway enforces ONE surface. When `resolve`'s record has no baseline but a single
+        # approved record answers to the name, enforcing that one is the more restrictive reading
+        # (None enforces nothing) — and it is what this reader returned before resolving like
+        # `resolve`, so no consumer of it lost protection to that change.
+        return others[0][1], None
+    return record, note
+
+
+#: What an agent does to a configured server name when it builds `mcp__<name>__<tool>`. MEASURED
+#: 2026-10-05 with Claude Code 2.1.289 (`claude -p` init event): `dot.server`, `space server` and
+#: `slash/server` became `dot_server`, `space_server`, `slash_server`. Pinned by
+#: tests/test_guard_agent_rewritten_names.py.
+_AGENT_UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+#: Agents whose hook payload carries the RAW configured server name, so the name the hook sees is
+#: never a rewrite: Windsurf supplies `mcp_server_name` separately (agents._parse_windsurf). For
+#: these the rewritten-name step would only add false candidates — 0.1.71 denied `a_b`'s own
+#: approved tool because a different server, `a.b`, lacked it (measured 2026-10-06).
+RAW_SERVER_NAME_FORMATS = frozenset({"windsurf"})
+
+
+def agent_server_name(configured: str) -> str:
+    """The server segment an agent puts in the tool name for a server configured as `configured`."""
+    return _AGENT_UNSAFE.sub("_", configured)
+
+
+def _rewritten_to(server: str, names) -> bool:
+    """True when one of `names` is NOT `server` but becomes `server` once the agent rewrites it:
+    the call may be reaching that server even though no name matches verbatim."""
+    return any(isinstance(n, str) and n != server and agent_server_name(n) == server
+               for n in names)
+
+
+def _candidate_label(server: str, key: str, row: dict) -> str:
+    """The name a candidate record is JUDGED and REPORTED under: the called name when the record
+    answers to it as configured, else its own configured name — so a deny reads "not in the
+    approved baseline for MCP server 'a.b'", never a_b's (0.1.71 said a_b's)."""
+    aliases = row.get("aliases") if isinstance(row.get("aliases"), list) else []
+    if server in aliases:
+        return server
+    for name in _record_names(key, aliases):
+        if isinstance(name, str) and agent_server_name(name) == server:
+            return name
+    return key
+
+
+def _record_names(key: str, aliases) -> list:
+    """Every configured name a stored record answers to: its aliases, and its asserted name."""
+    names = list(aliases) if isinstance(aliases, list) else []
+    if key.startswith("mcp:"):
+        names.append(key[len("mcp:"):])
+    return names
+
+
+def _could_be_adhoc_target(name: str) -> bool:
+    """A SUPERSET of `history._is_adhoc_target` (a URL or a command line). For such a name
+    `resolve_all` also matches the credential-MASKED form it was stored under, which this
+    stdlib-only module cannot compute (masking lives in `redact`). Rather than match fewer records
+    than `resolve` would — and single-match where it is ambiguous — the hook treats such a name as
+    unresolvable once the exact-key steps miss. Claude-style tool names (`mcp__<name>__...`) rarely
+    carry such a name, but Windsurf passes its raw config name, so an `org/tool` entry reachable only
+    through its alias is refused in strict mode and deferred (with a note) otherwise."""
+    return "/" in name or any(c.isspace() for c in name)
+
+
+def _lookup(server: str, store_path: Path, *,
+            rewritten: bool = True) -> tuple[dict | None, str | None, bool, list[tuple[str, dict]]]:
     """Read the approved surface from the PROJECTION the canonical writer generated — never from
     `history.json` itself. This hook used to hold its own second reader of the store, kept honest
     only by a test; now it consumes an artefact `history.save` produced, so the two cannot drift.
 
-    Returns `(approved, note)`. A missing, unreadable or STALE projection yields `(None, note)` —
-    the hook DEFERS, never enforces yesterday's baseline, and the note goes to stderr so the
-    degraded state is loud rather than silently unprotected. Silent None (no note) only when the
-    history store does not exist either: that is a fresh machine, not a failure."""
+    Returns `(approved record, note, strict_refuse, others)`.
+
+    * A missing, unreadable or STALE projection yields `(None, note, False)` — the hook DEFERS,
+      never enforces yesterday's baseline, and the note goes to stderr so the degraded state is
+      loud rather than silently unprotected. Silent `(None, None, False)` only when the history
+      store does not exist either: that is a fresh machine, not a failure.
+    * `strict_refuse` is True when the projection is FRESH and nothing in it shows that an approved
+      baseline applies to this name — never seen, never approved, ambiguous, or (on an old
+      projection) only reachable through an alias the projection cannot prove `history.resolve`
+      would pick. Strict mode denies on it ALONE, whatever the record and note say: a note
+      explaining an ambiguity is still a permit if it defers.
+    * `others` are the OTHER approved, interpretable records that answer to this name as a config
+      alias, `(key, row)` in key order. `record` is the one `history.resolve` picks; these are the
+      ones an agent calling `mcp__<name>__…` may equally be talking to (the credential-discriminator
+      shape: `mcp:x#<fp>` approved with alias `x`, a credential-free `mcp:x` not). `_decide` judges
+      the call against every one of them and takes the MOST RESTRICTIVE outcome: resolving like
+      `resolve` decides which record a pass is attributed to, never whether a baseline that
+      refuses the call is consulted. The hook only ever adds denials.
+    """
     proj = projection_path(store_path)
     try:
         history_stat = os.stat(store_path)
@@ -309,15 +432,15 @@ def _record_from_projection(server: str,
         raw = json.loads(proj.read_text(encoding="utf-8"))
     except OSError:
         if history_stat is None:
-            return None, None                       # fresh machine: nothing approved, nothing odd
+            return None, None, False, []             # fresh machine: nothing approved, nothing odd
         return None, ("no guard projection found beside the baseline store — deferring (not "
-                      "enforcing). Run `mcpgawk scan` to regenerate it.")
+                      "enforcing). Run `mcpgawk scan` to regenerate it."), False, []
     except (json.JSONDecodeError, ValueError):
         return None, ("the guard projection is not readable JSON — deferring (not enforcing). "
-                      "Run `mcpgawk scan` to regenerate it.")
+                      "Run `mcpgawk scan` to regenerate it."), False, []
     if not isinstance(raw, dict):
         return None, ("the guard projection has an unexpected shape — deferring (not enforcing). "
-                      "Run `mcpgawk scan` to regenerate it.")
+                      "Run `mcpgawk scan` to regenerate it."), False, []
 
     # THE STALENESS CHECK. The projection carries the stat of the history file it was derived
     # from; a mismatch means the store was written by something that did not regenerate the
@@ -330,55 +453,209 @@ def _record_from_projection(server: str,
     if not fresh:
         return None, ("the guard projection is STALE (the baseline store changed without "
                       "regenerating it) — deferring (not enforcing). Run `mcpgawk scan` to "
-                      "regenerate it.")
+                      "regenerate it."), False, []
 
     servers = raw.get("servers")
     if not isinstance(servers, dict):
-        return None, None
-    record = servers.get(server)
-    if record is None:
-        # The identity key is literally `mcp:<serverInfo.name>`, and an agent never says the prefix:
-        # it calls `mcp__<config name>__<tool>`. When the baseline came from a CLI scan
-        # (--stdio/--http) there IS no config name to alias — the only alias is "cli-stdio" — so a
-        # client whose config name matches the server's own name matched nothing and the guard
-        # DEFERRED on a server that had an approved baseline. Fail-open, on the documented
-        # single-server route the beta guide gives testers. Fixed in the READER so projections
-        # already on disk are covered without being regenerated.
-        # SAME ORDER AS `history.resolve` (exact key, then `mcp:<name>`, then aliases), and that
-        # agreement is the point. Alias-first was tried and reverted: it made the ENFORCING reader
-        # resolve a name differently from the one `mcpgawk approve <name>` uses, so an operator
-        # could approve record B while the guard enforced record A, with nothing saying so.
-        # Ordering does not decide safety here — a declared-tier DENY is only reachable when a
-        # baseline was found at all, so widening the lookup can add denials but never permissions.
-        # The alias scan below DEFERS on an ambiguous name rather than picking the first match —
-        # it was a known gap, and it is closed a few lines down. Placeholder labels
-        # (`cli-stdio` and friends) no longer reach an alias list at all: `history` refuses them at
-        # the write and sheds them at both doors, so they cannot single-match a survivor either.
-        record = servers.get(f"mcp:{server}")
-    if record is None:
-        matches = [c for c in servers.values()
-                   if isinstance(c, dict) and server in (c.get("aliases") or [])]
-        if len(matches) > 1:
-            # AMBIGUOUS: this name is an alias of several approved servers, and picking the first
-            # meant the ENFORCING reader silently judged a call against whichever record happened to
-            # sort first. The routine source of collisions (the reused ad-hoc placeholder) is shed
-            # now, so reaching here means two config entries really do share a name. Defer LOUDLY:
-            # never enforce a baseline we cannot show belongs to the server being called.
-            return None, (
-                f"{server!r} is an alias of {len(matches)} different approved servers — deferring "
-                f"(not enforcing) rather than guessing which baseline applies. Re-scan so each is "
-                f"keyed distinctly, or approve the one you mean by its own name.")
-        record = matches[0] if matches else None
+        return None, None, True, []
+    identities = raw.get("identities")
+    placeholders = raw.get("placeholder_names")
+    if isinstance(identities, dict) and isinstance(placeholders, list):
+        record, note, refuse = _resolve_over_identities(server, servers, identities, placeholders,
+                                                        rewritten=rewritten)
+    else:
+        record, note, refuse = _resolve_over_approved_only(server, servers)
+    others = [(key, row) for key, row in sorted(servers.items())
+              if isinstance(row, dict) and row is not record and not row.get("unreadable")
+              and isinstance(row.get("tools"), dict)
+              and (server in (row.get("aliases") or [])
+                   or (rewritten and _rewritten_to(server, _record_names(key, row.get("aliases")))))]
+    return record, note, refuse, others
+
+
+def _approved_row(server: str, servers: dict, key: str) -> tuple[dict | None, str | None, bool]:
+    """The approved row stored under `key`, or "no baseline" when the record behind it was never
+    approved. An approved row the writer marked uninterpretable is SAID, never enforced."""
+    record = servers.get(key)
     if not isinstance(record, dict):
-        return None, None
+        return None, None, True                  # the record exists; nobody approved it
     if reason := record.get("unreadable"):
         # The writer marked this baseline uninterpretable. Deferring is the only honest option — we
         # cannot enforce hashes computed by rules we do not know — but it must be SAID, because a
         # silent defer is indistinguishable from "this server was never approved", and the user
         # believes an approved server is being guarded.
         return None, (f"not enforcing {server!r}: {reason}. Re-approve it on this version, or "
-                      f"upgrade mcpgawk, to be guarded again.")
-    return record, None
+                      f"upgrade mcpgawk, to be guarded again."), False
+    return record, None, False
+
+
+def _resolve_over_identities(server: str, servers: dict, identities: dict, placeholders: list, *,
+                             rewritten: bool = True) -> tuple[dict | None, str | None, bool]:
+    """`history.resolve_all`, step for step, over EVERY record's identity (projection /2):
+    exact key, then `mcp:<name>`, then — unless the name is a placeholder label — config-name
+    aliases. ONE match is the record; it is enforced only if that record is approved. None or
+    several is "no baseline can be shown to apply": `history.resolve` returns None there, so the
+    in-process verdict has no baseline, and neither does this one.
+
+    Agreement with `resolve` is the point. Approved-rows-only resolution (projection /1) made a
+    never-approved `mcp:<name>` invisible, so a call to it was judged against whichever approved
+    record merely ALIASED `<name>` — in strict mode, a call to a never-approved server let through.
+    """
+    if server in identities:
+        return _approved_row(server, servers, server)
+    if f"mcp:{server}" in identities:
+        return _approved_row(server, servers, f"mcp:{server}")
+    if server in placeholders:
+        return None, None, True                  # a placeholder never names a server
+    if _could_be_adhoc_target(server):
+        return None, (f"{server!r} is shaped like an ad-hoc target, whose stored form this hook "
+                      f"cannot reproduce — not enforcing a baseline it cannot attribute."), True
+    matches = [key for key, aliases in identities.items()
+               if isinstance(aliases, list) and server in aliases]
+    how = "an alias of"
+    if not matches and rewritten:
+        # The AGENT'S name for a configured one: Claude Code rewrites `dot.server` to `dot_server`
+        # in the tool name, so no stored name matches verbatim. A step `history.resolve` does not
+        # need (it is given configured names); without it an approved server was deferred as never
+        # approved, and a rug pull on it passed in normal mode.
+        matches = [key for key, aliases in identities.items()
+                   if _rewritten_to(server, _record_names(key, aliases))]
+        how = "the name your agent gives"
+    if len(matches) > 1:
+        # AMBIGUOUS: `history.resolve` refuses this name, so no baseline can be shown to belong to
+        # the server being called. Never guess one. Normal mode defers LOUDLY; strict refuses.
+        kind = ("approved servers" if all(isinstance(servers.get(k), dict) for k in matches)
+                else "servers")
+        return None, (
+            f"{server!r} is {how} {len(matches)} different {kind} — deferring (not "
+            f"enforcing) rather than guessing which baseline applies. Re-scan so each is keyed distinctly, "
+            f"or approve the one you mean by its own name."), True
+    if not matches:
+        return None, None, True
+    return _approved_row(server, servers, matches[0])
+
+
+def _resolve_over_approved_only(server: str,
+                                servers: dict) -> tuple[dict | None, str | None, bool]:
+    """An OLD projection (/1, before `identities`): it lists approved records only, so it cannot
+    show which record `history.resolve` would pick for a name.
+
+    Exact-key and `mcp:<name>` hits are still provable: those steps come first in `resolve_all`,
+    so a hit there is the record `resolve` returns, and it is approved. An ALIAS hit is not — an
+    unapproved `mcp:<name>`, invisible here, would win in `resolve`. Normal mode enforces it as
+    before (the alternative, deferring, only removes protection until the projection is
+    regenerated). Strict mode REFUSES it: an unprovable attribution is not a baseline.
+    """
+    for key in (server, f"mcp:{server}"):
+        if isinstance(servers.get(key), dict):
+            record, note, _refuse = _approved_row(server, servers, key)
+            return record, note, False
+    stale_shape = (" (the guard projection predates the identity map; run `mcpgawk scan` to "
+                   "regenerate it)")
+    matches = [c for c in servers.values()
+               if isinstance(c, dict) and server in (c.get("aliases") or [])]
+    if len(matches) > 1:
+        return None, (
+            f"{server!r} is an alias of {len(matches)} different approved servers — deferring "
+            f"(not enforcing) rather than guessing which baseline applies. Re-scan so each is "
+            f"keyed distinctly, or approve the one you mean by its own name." + stale_shape), True
+    if not matches:
+        return None, None, True
+    record = matches[0]
+    if reason := record.get("unreadable"):
+        return None, (f"not enforcing {server!r}: {reason}. Re-approve it on this version, or "
+                      f"upgrade mcpgawk, to be guarded again."), True
+    return record, None, True
+
+
+def _row_evidence(record: dict | None, tool: str):
+    """`(approved {tool: hash}, approved props for this tool, last-seen hash, seen_at, permission
+    changes since approval, reverted hold)` from one projection row. All None for no row."""
+    if record is None:
+        return None, None, None, None, None, None
+    _tools = record.get("tools")
+    approved = dict(_tools) if isinstance(_tools, dict) else None
+    seen_hash = seen_at = approved_props = None
+    # The last sighting's hash for THIS tool (history.py projects it as `seen`): the only
+    # live-ish content evidence a 15 ms stdlib hook can hold. None on older projections.
+    _seen = record.get("seen")
+    if isinstance(_seen, dict):
+        _h = _seen.get(tool)
+        seen_hash = _h if isinstance(_h, str) and _h else None
+        _at = record.get("seen_at")
+        seen_at = _at if isinstance(_at, str) else None
+    _props = record.get("props")
+    if isinstance(_props, dict):
+        _p = _props.get(tool)
+        if isinstance(_p, list):
+            approved_props = [str(x) for x in _p]
+    grown = None
+    _pc = record.get("permission_changes")
+    if isinstance(_pc, dict) and isinstance(_pc.get(tool), list):
+        grown = [str(x) for x in _pc[tool] if x] or None
+    # THE LATCH: changed at an earlier sighting since approval, back to approved now (history.py).
+    reverted = None
+    _rv = record.get("reverted")
+    if isinstance(_rv, dict) and isinstance(_rv.get(tool), dict):
+        reverted = {"at": _rv[tool].get("at") if isinstance(_rv[tool].get("at"), str) else None}
+    return approved, approved_props, seen_hash, seen_at, grown, reverted
+
+
+def _judge(core, server: str, tool: str, record: dict | None, observations, sources, args):
+    """`core.verdict` against ONE projection row, tolerant of an older decision core."""
+    approved, approved_props, seen_hash, seen_at, grown, reverted = _row_evidence(record, tool)
+    args = args if isinstance(args, dict) else None
+    if reverted:
+        try:
+            return core.verdict(server, tool, approved, observations, sources,
+                                live_hash=seen_hash, args=args, approved_props=approved_props,
+                                seen_at=seen_at, permission_changes=grown, reverted=reverted)
+        except TypeError:
+            pass   # an older decision core: fall through, the hold is not enforced by it
+    try:
+        return core.verdict(server, tool, approved, observations, sources, live_hash=seen_hash,
+                            args=args, approved_props=approved_props, seen_at=seen_at,
+                            permission_changes=grown)
+    except TypeError:
+        pass
+    try:
+        return core.verdict(server, tool, approved, observations, sources, live_hash=seen_hash,
+                            args=args, approved_props=approved_props, seen_at=seen_at)
+    except TypeError:
+        # An older decision core beside a newer hook (mixed install): the newer keyword is
+        # silently absent rather than the hook crashing — a crashed hook allows everything.
+        try:
+            return core.verdict(server, tool, approved, observations, sources,
+                                live_hash=seen_hash, args=args, approved_props=approved_props)
+        except TypeError:
+            return core.verdict(server, tool, approved, observations, sources)
+
+
+def _collision_reason(core_reason: str, server: str, label: str, tool: str) -> str:
+    """The deny for a call whose name the agent gives two servers (Claude Code calls `a.b` and
+    `a_b` both `a_b`). The core's first sentence, judged under `label`, is true and carries the
+    reason code; its "Tell the user: '<label>' added a tool" line is not (neither server added
+    anything), so the truth — the ambiguity — replaces it. The no-retry line is kept verbatim."""
+    lines = core_reason.splitlines()
+    first = lines[0] if lines else ""
+    for prefix in ("[mcpgawk guard] ", "SECURITY BLOCK (mcpgawk). "):
+        first = first[len(prefix):] if first.startswith(prefix) else first
+    first = first.split(". ", 1)[0].rstrip(".") + "."
+    final = next((ln for ln in lines if ln.startswith("This decision is final")), "")
+    return (f"SECURITY BLOCK (mcpgawk). Your agent gives two different MCP servers "
+            f"the one name '{server}', so mcpgawk cannot tell which one this call reaches. {first}"
+            f"\n{final}\nTell the user exactly this: two MCP servers in the agent config, '{label}' "
+            f"and another, are both called '{server}' by this agent, so mcpgawk refused '{tool}' "
+            f"rather than guess which one it reaches. Renaming one of them in the agent config "
+            f"removes the ambiguity.")
+
+
+def _attribute(reason: str, server: str, key: str) -> str:
+    """A deny that came from an approved record OTHER than the one `history.resolve` picks for the
+    name says whose baseline refused it — the operator otherwise reads a block on `server` and
+    looks at the wrong record. Adds a fact only: no remedy, no override."""
+    return (f"{reason}\n(Refused by the approved baseline of '{key}', a server that answers to "
+            f"the name '{server}' in your agent config.)")
 
 
 def decide(event: dict, store_path: Path | None = None,
@@ -408,27 +685,9 @@ def _decide(event: dict, store_path: Path | None,
     server, tool = parsed
 
     store = store_path or history_path()
-    record, note = _record_from_projection(server, store)
-    approved = None
-    approved_props = None
-    seen_hash = None
-    seen_at = None
-    if record is not None:
-        _tools = record.get("tools")
-        approved = dict(_tools) if isinstance(_tools, dict) else None
-        # The last sighting's hash for THIS tool (history.py projects it as `seen`): the only
-        # live-ish content evidence a 15 ms stdlib hook can hold. None on older projections.
-        _seen = record.get("seen")
-        if isinstance(_seen, dict):
-            _h = _seen.get(tool)
-            seen_hash = _h if isinstance(_h, str) and _h else None
-            _at = record.get("seen_at")
-            seen_at = _at if isinstance(_at, str) else None
-        _props = record.get("props")
-        if isinstance(_props, dict):
-            _p = _props.get(tool)
-            if isinstance(_p, list):
-                approved_props = [str(x) for x in _p]
+    record, note, strict_refuse, others = _lookup(
+        server, store, rewritten=fmt not in RAW_SERVER_NAME_FORMATS)
+    approved, _props, _seen, seen_at, _grown, _reverted = _row_evidence(record, tool)
 
     # The verdict itself comes from the shared decision core — the paid gateway evaluates the SAME
     # functions, so the paths cannot drift apart. If the core cannot be loaded we cannot compute a
@@ -436,6 +695,21 @@ def _decide(event: dict, store_path: Path | None,
     core = _load_sibling("decision")
     if core is None:
         return None, note, "declared", False, None, None
+
+    # STRICT: no baseline is a refusal, not a pass. Only on a FRESH projection that cannot show an
+    # approved baseline applies to this name (`strict_refuse`); a stale or unreadable projection
+    # still defers loudly, because there the absence proves nothing about what was approved. Keyed
+    # on the flag ALONE: an ambiguity carries a note and an old projection's alias hit carries a
+    # record, and gating on either let a never-approved server through (cd0e8019 predated both).
+    strict_fn = getattr(core, "strict_no_baseline_reason", None)
+    if strict_refuse and callable(strict_fn) and _strict(store):
+        reason = strict_fn(server, tool)
+        human = None
+        line_fn = getattr(core, "human_line", None)
+        code_fn = getattr(core, "reason_code", None)
+        if callable(line_fn) and callable(code_fn):
+            human = line_fn(server, tool, code_fn(reason))
+        return _deny(fmt, reason, human), None, "declared", True, reason, None
 
     # The behavioural tier (free since Task 0): observations verify recorded for THIS server,
     # plus this session's earlier observed-source calls from the spool. Both are gathered only
@@ -450,22 +724,23 @@ def _decide(event: dict, store_path: Path | None,
     if behaviour and observations and (observations.get(tool) or {}).get("sink") is True:
         sources = _session_sources(_session_id(event), behaviour)
 
-    try:
-        verdict, basis, reason = core.verdict(server, tool, approved, observations, sources,
-                                              live_hash=seen_hash,
-                                              args=_args if isinstance(_args, dict) else None,
-                                              approved_props=approved_props,
-                                              seen_at=seen_at)
-    except TypeError:
-        # An older decision core beside a newer hook (mixed install): the newer keyword is
-        # silently absent rather than the hook crashing — a crashed hook allows everything.
-        try:
-            verdict, basis, reason = core.verdict(server, tool, approved, observations, sources,
-                                                  live_hash=seen_hash,
-                                                  args=_args if isinstance(_args, dict) else None,
-                                                  approved_props=approved_props)
-        except TypeError:
-            verdict, basis, reason = core.verdict(server, tool, approved, observations, sources)
+    verdict, basis, reason = _judge(core, server, tool, record, observations, sources, _args)
+    collision: str | None = None
+    if verdict != core.DENY:
+        # MOST RESTRICTIVE ACROSS EVERY CANDIDATE. `record` is what `history.resolve` picks; every
+        # other approved record answering to this name as a config alias is judged too, and any
+        # one that refuses the call refuses it. Resolving like `resolve` must never cost the
+        # protection an approved alias record gave (credential-discriminator shape: `resolve`
+        # picks a never-approved `mcp:x` over the approved `mcp:x#<fp>` the agent may be calling).
+        for key, row in others:
+            label = _candidate_label(server, key, row)
+            v, b, r = _judge(core, label, tool, row, observations, sources, _args)
+            if v == core.DENY:
+                if label != server:
+                    collision = label
+                    r = _collision_reason(r, server, label, tool)
+                verdict, basis, reason = v, b, _attribute(r, server, key)
+                break
     # Checked means there was something to check AGAINST: an approved surface for this server, or
     # recorded observations of it. With neither, `verdict` had no evidence and whatever it returned
     # is a decline, not a pass. A DENY is checked by construction.
@@ -478,6 +753,9 @@ def _decide(event: dict, store_path: Path | None,
         code_fn = getattr(core, "reason_code", None)
         if callable(line_fn) and callable(code_fn):
             human = line_fn(server, tool, code_fn(reason))
+        if collision:
+            human = (f"mcpgawk blocked {server}.{tool} — your agent calls two servers '{server}', and "
+                     f"'{collision}' does not allow this call. Rename one of them in the agent config.")
         return _deny(fmt, reason, human), note, basis, checked, reason, None
     # Slice 5 (2026-09-05): context for the running agent — on a checked pass, once per session
     # per server+tool; on every defer. Composed here, EMITTED by main() for Claude Code only, and
@@ -506,6 +784,7 @@ def _deny(fmt: str, reason: str, human: str | None = None) -> dict:
     getting this right per agent is a security property, not formatting."""
     text = f"[mcpgawk guard] {reason}"
     mod = _load_sibling("agents")
+    payload: dict
     if mod is None:
         payload = {"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                           "permissionDecision": "deny",

@@ -97,7 +97,19 @@ def install_argv(wheel: Path) -> list[str]:
     pipx = shutil.which("pipx")
     if "pipx" in prefix.parts and pipx:
         return [pipx, "install", "--force", str(wheel)]
+    # A plain venv installs with its own pip — unless it has none. `uv venv` creates no pip, so
+    # `uv venv && uv pip install mcpgawk` (a common path) reached here and died AFTER the engine
+    # was fetched: "No module named pip" (measured on the published 0.1.52, 2026-09-22). When pip
+    # is absent and uv is on PATH, let uv install into THIS interpreter — still the one rule.
+    if _has_pip() is False and uv:
+        return [uv, "pip", "install", "--quiet", "--python", sys.executable, "--reinstall", str(wheel)]
     return [sys.executable, "-m", "pip", "install", "--quiet", "--force-reinstall", str(wheel)]
+
+
+def _has_pip() -> bool:
+    """Whether `python -m pip` would run in this interpreter. Isolated so a test can decide."""
+    import importlib.util
+    return importlib.util.find_spec("pip") is not None
 
 
 def _own_binary() -> str:
@@ -110,12 +122,12 @@ def _own_binary() -> str:
 
 USAGE = (
     "usage: mcpgawk login '<license-key>'\n\n"
-    "Wrap the key in single quotes: it carries | characters, which your shell would read as a\n"
-    "pipe and split the key at the first one.\n\n"
+    "Keep the key in single quotes so your shell passes it through whole.\n\n"
     "Your key is the only thing you add. With it, `login` fetches the paid engine (pre-built,\n"
     "checksum-verified, gated on the key), installs it beside the free scanner, and saves the key\n"
-    "so the paid capabilities unlock. Lost the key? https://mcp.gawk.dev/trial.html or reply to\n"
-    "the email that carried it. The free scanner (`mcpgawk scan`) keeps working either way."
+    "so the paid capabilities unlock. Lost the key? It is in your subscription or trial email;\n"
+    "reply to that email, or see https://mcp.gawk.dev/activate.html. The free scanner\n"
+    "(`mcpgawk scan`) keeps working either way."
 )
 
 
@@ -141,9 +153,10 @@ def login_with_fetch(key: str) -> int:
     print("Fetching the paid engine with your key (pre-built, checksum-verified) …", flush=True)
     status, body = _post(ENDPOINT, json.loads(request_body(key)))
     if status == 403:
-        print("mcpgawk login: this key does not unlock the engine (it is not on a live trial or "
-              "licence). Request a trial at https://mcp.gawk.dev/trial.html, or check the key "
-              "you pasted — the whole key, in single quotes.", file=sys.stderr)
+        print("mcpgawk login: this key does not unlock the engine — it is not on a live trial or "
+              "subscription. Subscribe at https://mcp.gawk.dev/subscribe, start a free trial at "
+              "https://mcp.gawk.dev/trial.html, or check you pasted the whole key in single "
+              "quotes.", file=sys.stderr)
         return EXIT_NOT_ELIGIBLE
     if status != 200 or not all(body.get(k) for k in ("url", "filename", "sha256")):
         print(f"mcpgawk login: the engine download is not available right now (HTTP {status}). "

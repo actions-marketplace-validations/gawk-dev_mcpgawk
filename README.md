@@ -5,8 +5,10 @@
   </picture>
 </p>
 <p align="center"><em>One gateway in the path. On your machine.</em></p>
+<p align="center"><a href="https://www.producthunt.com/products/mcpgawk?launch=mcpgawk"><img alt="mcpgawk on Product Hunt" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1259498&theme=light" width="250" height="54"></a><br>Featured on Product Hunt.</p>
 
 # mcpgawk
+<!-- mcp-name: io.github.gawk-dev/mcpgawk -->
 
 [![PyPI](https://img.shields.io/pypi/v/mcpgawk.svg)](https://pypi.org/project/mcpgawk/)
 [![Python](https://img.shields.io/pypi/pyversions/mcpgawk.svg)](https://pypi.org/project/mcpgawk/)
@@ -24,9 +26,16 @@ you approved, and blocks the ones that changed. It runs on your machine and uplo
 The same engine powers **mcpgawk Platform**: `mcpgawk enforce` puts one endpoint in front of the
 whole fleet with a key per caller, policy on every call and a hash-chained audit log, and
 `mcpgawk monitor` watches the servers you approved around the clock and tells you when one drifts.
-This free layer is the seeing and the blocking underneath it. If you have a licence,
-`mcpgawk login <key>` fetches the paid engine and turns those on — the same install, one more
-command, nothing else to set up.
+This free layer is the seeing and the blocking underneath it. mcpgawk Platform is one subscription
+per person for up to 3 machines: start a free 7-day trial at https://mcp.gawk.dev/trial.html?utm_source=github&utm_medium=readme
+(no card) or subscribe at https://mcp.gawk.dev/subscribe. Then `mcpgawk login <key>` on this same
+install fetches the paid engine and turns those on — one more command, nothing else to set up.
+
+<p align="center">
+  <a href="https://mcp.gawk.dev/gh#watch"><img src="https://mcp.gawk.dev/assets/video/mcpgawk-launch-poster.jpg" width="720"
+       alt="mcpgawk in 64 seconds: a tool you approved changes in an update, and mcpgawk refuses the call until you decide. Watch the video."></a>
+</p>
+<p align="center"><sub><b>Watch: mcpgawk in 64 seconds.</b> A tool you approved changes in an update; mcpgawk refuses the call until you decide.</sub></p>
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/gawk-dev/mcpgawk/main/assets/brand/demo.gif"
@@ -84,13 +93,17 @@ request, used or not.
 
 ## Get it — three ways
 
+[![Install mcpgawk from PyPI, the VS Code Marketplace or Open VSX (13-second film)](https://mcp.gawk.dev/assets/video/mcpgawk-registries-poster.jpg)](https://youtu.be/Gu-6oriEBio)
+
 **CLI** (any terminal):
 ```bash
 uv tool install --force mcpgawk      # or: pipx install --force mcpgawk
 mcpgawk                              # finds every agent config on the machine itself
 ```
 
-**Editor** (VS Code / Cursor): install **mcpgawk** from the marketplace ([Open VSX](https://open-vsx.org/extension/gawk-dev/mcpgawk)). It scans your workspace `mcp.json` and shows cost + capability flags inline. The extension drives this engine as a subprocess — it is built and released separately, so its source is not in this repository.
+Run it as an MCP server: `mcpgawk mcp` (stdio), or `uvx mcpgawk mcp`.
+
+**Editor** (VS Code / Cursor): install **mcpgawk** from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=gawk-dev.mcpgawk) or [Open VSX](https://open-vsx.org/extension/gawk-dev/mcpgawk). It scans your workspace `mcp.json` and shows cost + capability flags inline. The extension drives this engine as a subprocess — it is built and released separately, so its source is not in this repository.
 
 **CI** (GitHub Action): gate every PR on token budget / drift ([Marketplace](https://github.com/marketplace/actions/mcpgawk-mcp-hygiene-gate)):
 ```yaml
@@ -133,6 +146,17 @@ mcpgawk scan mcp.json --json                                      # machine-read
 mcpgawk scan mcp.json --verbose                                   # full per-tool table, not just flagged tools
 mcpgawk scan mcp.json --supply-chain                              # opt-in: npm/PyPI deprecation check (network)
 mcpgawk scan mcp.json --oauth-scopes                              # opt-in: decode a supplied Bearer JWT's scope
+```
+
+Keep tokens out of the config file. Under `mcpgawk wrap`, an `env` value written as `keychain:<service>`
+(or `keychain:<service>@<account>`) is read from your macOS Keychain when the server starts and placed
+in the server's environment only. The config holds a reference, the agent sees a reference, mcpgawk
+stores nothing. A reference that cannot be read refuses to start the server and names the reference,
+never a value.
+
+```json
+"github": { "command": "mcpgawk", "args": ["wrap", "--", "npx", "-y", "@modelcontextprotocol/server-github"],
+            "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "keychain:gh-work" } }
 ```
 
 ## What it reports
@@ -196,7 +220,7 @@ boundaries in [THREAT-MODEL.md](THREAT-MODEL.md). Security reports go through [S
 
 ## License
 
-**Apache-2.0** — see [LICENSE](LICENSE). Part of the [**nativerse**](https://nativerse-ventures.com/) · [gawk.dev](https://gawk.dev/) family. Site and docs: [mcp.gawk.dev](https://mcp.gawk.dev/). The value is in the
+**Apache-2.0** — see [LICENSE](LICENSE). Part of the [**nativerse**](https://nativerse-ventures.com/) · [gawk.dev](https://gawk.dev/) family. Site and docs: [mcp.gawk.dev](https://mcp.gawk.dev/?utm_source=github&utm_medium=readme). The value is in the
 repo, not a cloud.
 
 ## Use it from your agent (skill)

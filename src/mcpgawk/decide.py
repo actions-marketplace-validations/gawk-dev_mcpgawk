@@ -51,18 +51,35 @@ def pending_decisions(store: dict[str, Any]) -> list[dict[str, Any]]:
     and the page cannot disagree with `mcpgawk status` about what is outstanding."""
     out: list[dict[str, Any]] = []
     for key in history.pending(store):
-        approved, latest = history.approved(store, key), history.last(store, key)
+        # The sighting to REVIEW, not merely the last: a change that reverted is still shown as the
+        # change it was (history.sighting_to_review, the one rule pending() uses too).
+        approved, latest = history.approved(store, key), history.sighting_to_review(store, key)
         if not approved or not latest:
             continue
         report = drift.compare(approved, latest)
         if report is None:
             continue
+        entry = (store.get("servers") or {}).get(key) or {}
         out.append({
             "key": key,
             "name": history.display_name(store, key),
             "report": report,
+            # The step (since the current approval) and the TOTAL (since the original baseline):
+            # a widening in small steps is invisible in the step alone. None when they coincide.
+            "since_last": history.approval_change(approved, latest),
+            "since_original": history.since_original(entry, latest),
             "hostile": list(report.hostile),
             "seen_at": latest.get("seen") or "",
+            # THE one sentence (history.changed_head) — "Changed after you approved it" was a
+            # literal here for every origin (2026-10-09).
+            "head": history.changed_head(
+                history.baseline_origin(store, key),
+                ("on " + str(entry.get("approved_at") or approved.get("measured_at") or "")[:10])
+                if (entry.get("approved_at") or approved.get("measured_at")) else None
+            )[:1].upper() + history.changed_head(
+                history.baseline_origin(store, key),
+                ("on " + str(entry.get("approved_at") or approved.get("measured_at") or "")[:10])
+                if (entry.get("approved_at") or approved.get("measured_at")) else None)[1:],
         })
     return out
 
@@ -129,7 +146,11 @@ def _diff_block(report: drift.DriftReport) -> str:
                 f'<div class="was">{_esc(report.unreadable)}</div>'
                 '<div class="now">Nothing was compared, so there is no diff to judge. Approving '
                 'here would trust a surface no one has seen.</div></div>')
-    for tool in report.hostile:
+    # ONLY AN INJECTED KEY IS "the rug-pull signature". `hostile` is injected ∪ escalated, and a
+    # tool that merely gained openWorldHint has no inserted text to accuse (supademo, 2026-10-09:
+    # three tools were shown as rug-pulls for an annotation flip). The escalated keys get their
+    # own row below, saying what grew; the scan's per-line writer follows the same split.
+    for tool in report.injected:
         before, after = report.texts.get(tool, ("", ""))
         rows.append(
             f'<div class="ev danger"><div class="lbl">⚠ {_esc(tool)} — '
@@ -138,23 +159,63 @@ def _diff_block(report: drift.DriftReport) -> str:
                if before or after else "")
             + "</div>")
     for tool in report.added:
-        rows.append(f'<div class="ev"><div class="lbl">+ {_esc(tool)} — a tool that did not exist '
-                    f'when you approved this server</div></div>')
+        rows.append(f'<div class="ev"><div class="lbl">+ {_esc(tool)} — not in the baseline; '
+                    f'added since</div></div>')
     for tool in report.removed:
         rows.append(f'<div class="ev"><div class="lbl">− {_esc(tool)} — removed</div></div>')
     for tool in report.changed:
-        if tool in report.hostile:
+        if tool in report.injected:
             continue
         before, after = report.texts.get(tool, ("", ""))
         rows.append(f'<div class="ev"><div class="lbl">~ {_esc(tool)} — description changed</div>'
                     + (f'<div class="was">{_esc(before)}</div><div class="now">{_esc(after)}</div>'
                        if before or after else "") + "</div>")
     for tool in report.annotation_changed:
-        rows.append(f'<div class="ev danger"><div class="lbl">⚠ {_esc(tool)} — safety annotations '
-                    f'changed (a tool relabelled itself)</div></div>')
+        rows.append(_hint_row(report, tool, mark="⚠ "))
     for tool in report.schema_changed:
         rows.append(f'<div class="ev"><div class="lbl">~ {_esc(tool)} — inputs changed</div></div>')
     return "\n".join(rows) or '<div class="ev"><div class="lbl">No detail recorded.</div></div>'
+
+
+def _hint_row(report: drift.DriftReport, tool: str, mark: str = "") -> str:
+    """The annotation row with its was/now. Red only when something widened: writing the spec
+    defaults down is not a relabel, and calling it one taught approvers to fear honest servers."""
+    moves = report.hint_moves(tool)
+    widened = bool(report.escalations(tool))
+    cls = "ev danger" if widened else "ev"
+    head = mark if widened else "~ "
+    # A widening keeps the struck-out/red was-now pair. Anything else is one plain line per hint:
+    # red "now" text under "nothing widened" contradicted itself (walk of 0.1.81, Tently 0.1.2).
+    if not moves:
+        body = ""
+    elif widened:
+        body = (f'<div class="was">{_esc(chr(10).join(f"{n}: {w}" for n, w, _ in moves))}</div>'
+                f'<div class="now">{_esc(chr(10).join(f"{n}: {v}" for n, _, v in moves))}</div>')
+    else:
+        body = (f'<div class="moves">'
+                f'{_esc(chr(10).join(f"{n}: {w} → {v}" for n, w, v in moves))}</div>')
+    return (f'<div class="{cls}"><div class="lbl">{head}{_esc(tool)} — '
+            f'{_esc(report.hint_summary(tool))}</div>{body}</div>')
+
+
+def _blocks_calls(r: drift.DriftReport) -> bool:
+    """Does the guard REFUSE calls on this change, or only queue it? Every card used to say
+    "blocked", including a type change or a reworded parameter that the guard lets through while it
+    waits for sign-off (decision.py, FOUNDER 2026-08-15). Queue-only is claimed ONLY when the whole
+    change is schema/annotation movement with no permission growth; anything else keeps the
+    blocked wording, because calling a blocked change harmless is the worse error."""
+    if (r.unreadable or r.login_changed or r.transport_changed or r.protocol_changed
+            or r.added or r.changed or r.hostile):
+        return True
+    moved = r.schema_changed + r.annotation_changed
+    return not moved or any(r.permission_changes(k) for k in moved)
+
+
+def _total_line(total: Any) -> str:
+    """The change since the ORIGINAL baseline, under the step: what trusting this makes the server,
+    measured from where it started. Empty when the step is the whole story."""
+    words = history.original_words(total)
+    return f'<p class="sub"><b>In total</b>, {_esc(words)}.</p>' if words else ""
 
 
 def render_page(items: list[dict[str, Any]], token: str, note: str = "",
@@ -183,7 +244,7 @@ def render_page(items: list[dict[str, Any]], token: str, note: str = "",
                          f'changed or stopped answering is not a server that matches. '
                          f'See <code>mcpgawk monitor status</code>.</p>')
         body = ('<div class="done"><h1>Nothing is waiting on you.</h1>'
-                '<p>Every server with an approved baseline still matches it. '
+                '<p>Every server with a baseline still matches it. '
                 'This page opens when that stops being true.</p>'
                 + "".join(notes) + '</div>')
     else:
@@ -191,15 +252,21 @@ def render_page(items: list[dict[str, Any]], token: str, note: str = "",
         for it in items:
             r: drift.DriftReport = it["report"]
             danger = " danger" if it["hostile"] else ""
+            if _blocks_calls(r):
+                pill, gate = "blocked · waiting on you", "Your agents cannot call it until you decide."
+            else:
+                pill, gate = ("queued · waiting on you",
+                              "Calls still go through; this waits for your sign-off.")
             cards.append(f"""
 <section class="card{danger}">
   <div class="head">
     <h2>{_esc(it['name'])}</h2>
-    <span class="pill">blocked · waiting on you</span>
+    <span class="pill">{pill}</span>
   </div>
-  <p class="sub">Changed after you approved it{(' · last seen ' + _esc(it['seen_at'])) if it['seen_at'] else ''}.
-     Your agents cannot call it until you decide.</p>
+  <p class="sub">{_esc(it.get('head') or 'Changed since its baseline')}{(' · last seen ' + _esc(it['seen_at'])) if it['seen_at'] else ''}.
+     {gate}</p>
   {_diff_block(r)}
+  {_total_line(it.get('since_original'))}
   {(f'''<form method="POST" action="/decide">
     <input type="hidden" name="token" value="{_esc(token)}">
     <input type="hidden" name="key" value="{_esc(it['key'])}">
@@ -239,6 +306,8 @@ padding:2px 8px;border-radius:99px;border:1px solid var(--bad);color:var(--bad)}
 background:var(--was);white-space:pre-wrap;word-break:break-word}}
 .was{{color:var(--muted);text-decoration:line-through}}
 .now{{color:var(--bad)}}
+.moves{{font-family:var(--mono);font-size:12px;padding:8px 10px;margin-top:6px;
+background:var(--was);white-space:pre-wrap;word-break:break-word}}
 form{{margin-top:18px;display:flex;gap:10px;flex-wrap:wrap}}
 .btn{{font-family:var(--sans);font-size:14px;font-weight:600;padding:9px 16px;
 border:1px solid var(--rule);background:var(--bg);color:var(--ink);cursor:pointer;border-radius:3px}}
@@ -370,7 +439,7 @@ def serve(port: int = DEFAULT_PORT, open_browser: bool = True, log=print) -> int
     Refuses in an agent session for the same reason `approve` does: this screen exists to put a
     HUMAN in front of the decision, and an agent that can start it can drive it."""
     blocked = baseline.approval_blocked_reason()
-    if blocked and os.environ.get(baseline.APPROVE_OVERRIDE_ENV) != "1":
+    if blocked:
         log(f"mcpgawk decide: refusing — {blocked}")
         return 4
 
@@ -391,7 +460,7 @@ def serve(port: int = DEFAULT_PORT, open_browser: bool = True, log=print) -> int
         # The SAME scoping the page uses. This line is what a user reads before the browser even
         # opens, so an all-clear here is read exactly as hard as one on the page.
         gaps = uncovered(store)
-        log("\n  No server with an approved baseline has changed since you approved it.")
+        log("\n  No server has changed since its baseline.")
         if gaps.get("alerts"):
             who = ", ".join(gaps.get("alert_servers", [])[:6])
             log(f"  ⚠ monitoring is separately holding {gaps['alerts']} unaccepted alert(s) on "

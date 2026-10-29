@@ -27,6 +27,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .node_runtime import find_node, install_hint
+
 if TYPE_CHECKING:
     from typing import TextIO
 
@@ -100,7 +102,6 @@ def _print_observed_followup(stream: "TextIO | None" = None) -> None:
     except Exception:  # noqa: BLE001
         return
 
-from .node_runtime import find_node, install_hint
 
 #: Where the compiled engine lives once installed. A checkout's dev build wins over it — see
 #: `resolve_cli_js`.
@@ -195,7 +196,7 @@ def _wants_source_audit(argv: list[str]) -> bool:
 _AUDIT_NEEDS_PLATFORM = (
     "mcpgawk verify --audit-source: source audit is a mcpgawk Platform capability and the Platform "
     "isn't installed in this environment.\n"
-    "  £29/month, 7-day free trial — https://mcp.gawk.dev/pricing.html\n"
+    "  7-day free trial — https://mcp.gawk.dev/pricing.html\n"
     "Behavioural verification itself is free: re-run without --audit-source / --source-dir."
 )
 

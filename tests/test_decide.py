@@ -254,3 +254,40 @@ def test_a_store_with_no_recorded_latest_is_skipped_not_crashed():
     store = json.loads(json.dumps(_store()))
     store["servers"]["mcp:gitnexus"]["history"] = []
     assert decide.pending_decisions(store) == []
+
+
+# --- the card says what the guard does ---------------------------------------------------------- #
+
+def _schema_store(new_props: list[str]) -> dict:
+    """Same description, different input schema: the guard queues this (decision.py) unless a new
+    parameter names a destination or code to execute."""
+    item = {"tool.search_repo": "h1"}
+    texts = {"tool.search_repo": OLD}
+    return {"servers": {"mcp:gitnexus": {
+        "aliases": ["gitnexus"],
+        "approved": {"items": item, "texts": texts, "schemas": {"tool.search_repo": "s1"},
+                     "props": {"tool.search_repo": ["query"]},
+                     "measured_at": "2026-07-21T09:00:00Z", "pin": "p1", "cost_index": 100},
+        "history": [{"items": item, "texts": texts, "schemas": {"tool.search_repo": "s2"},
+                     "props": {"tool.search_repo": new_props},
+                     "measured_at": "2026-07-28T09:00:00Z", "pin": "p2", "cost_index": 100}]}}}
+
+
+def test_a_queued_schema_change_is_not_called_blocked():
+    """A reworded or widened input the guard lets through must not be shown as 'blocked': the
+    person would decide under a false picture of what their agent can do right now."""
+    items = decide.pending_decisions(_schema_store(["query", "limit"]))
+    assert items, "a schema-only change must still be a pending decision"
+    page = decide.render_page(items, token="t")
+    assert "queued · waiting on you" in page and "Calls still go through" in page
+    assert "blocked · waiting on you" not in page
+
+
+def test_a_new_destination_parameter_is_still_called_blocked():
+    page = decide.render_page(decide.pending_decisions(_schema_store(["query", "url"])), token="t")
+    assert "blocked · waiting on you" in page and "queued" not in page
+
+
+def test_a_description_change_is_still_called_blocked():
+    page = decide.render_page(decide.pending_decisions(_store()), token="t")
+    assert "blocked · waiting on you" in page and "queued · waiting" not in page

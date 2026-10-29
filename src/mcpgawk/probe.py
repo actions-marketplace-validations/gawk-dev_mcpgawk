@@ -69,8 +69,11 @@ class ServerSnapshot:
     # (a live URL that isn't MCP — e.g. an HTML docs page), "auth-required" (a real MCP endpoint that
     # refused us 401/403 — the user needs `--login`/`--header`, NOT a different URL),
     # "command-missing" (a stdio entry whose program is not on disk — see probe(), and note this is
-    # a DIFFERENT user action from "unreachable": the entry is stale, not the server down).
-    # None when there is no error.
+    # a DIFFERENT user action from "unreachable": the entry is stale, not the server down),
+    # "server-error" (the endpoint answered HTTP 5xx — up but failing; try later, the URL is right),
+    # "access-denied" (a 403 answering a request that carried a credential — signed in, not allowed),
+    # and the sign-in kinds "sign-in-failed" / "sign-in-incomplete" / "registration-refused" /
+    # "login-unreadable". None when there is no error.
     error_kind: str | None = None
     # Set by the permuting prober when the URL/transport that actually answered is NOT the one that
     # was declared (see transport.py). None means "the declaration was right" — the common case.
@@ -90,6 +93,10 @@ class ServerSnapshot:
     #: sign-in is distinguishable from a refresh. Never part of the store key: re-keying on a
     #: re-login would make it a first sighting, which is silence.
     login_id: str | None = None
+    #: True only when a remote connection PROVABLY carried no credential: no header, no sign-in,
+    #: no query string (a key can ride in the URL). None when unknown — stdio (env vars) or any
+    #: header at all. It gates advice that presumes a token exists (T6, 2026-09-25).
+    anonymous: bool | None = None
 
     @property
     def transport_corrected(self) -> bool:
@@ -136,12 +143,12 @@ async def _snapshot(session: ClientSession, name: str, transport: str) -> Server
         # SDK v2 renamed the model attrs to snake_case; by_alias keeps the STORED shape on the
         # wire form (camelCase) so existing baselines and fingerprints do not all drift at once.
         protocol_version = init.protocol_version
-        server_info = (init.server_info.model_dump(by_alias=True, mode="json")
-                       if init.server_info else {})
+        _si = init.server_info
+        server_info = _si.model_dump(by_alias=True, mode="json") if _si else {}
         caps = getattr(init, "capabilities", None)
         try:
             capabilities = (caps.model_dump(by_alias=True, mode="json", exclude_none=True)
-                            if hasattr(caps, "model_dump") else dict(caps or {}))
+                            if caps is not None and hasattr(caps, "model_dump") else dict(caps or {}))
         except Exception:         # noqa: BLE001 — capabilities are evidence, never load-bearing
             capabilities = {}
     except Exception:             # noqa: BLE001 - "refused initialize" is the modern signature
@@ -214,19 +221,98 @@ def _status_recorder() -> tuple[dict[str, int | None], Any]:
     server is indistinguishable from a dead host unless we record the status at the moment it
     arrives. (The SSE client does raise the real status error; this is the streamable path's gap.)
     """
-    seen: dict[str, int | None] = {"status": None}
+    seen: dict[str, Any] = {"status": None, "refused": None, "denied": None, "not_mcp": False}
 
     async def hook(response) -> None:
-        seen["status"] = response.status_code
+        code = response.status_code
+        seen["status"] = code
+        credentialed = "authorization" in {k.lower() for k in response.request.headers}
+        if _not_mcp_answer(response, credentialed):
+            # T1/T2 (2026-09-25): a web page answered. Only a 401, or a 403 that challenges or
+            # answers a credential, is a sign-in refusal; the recorded status must not read as one.
+            seen["not_mcp"] = True
+            return
+        # 0.1.58 RC (Axiom, 2026-09-25): a 403 answering a request that CARRIED a credential is
+        # "signed in, not allowed" — not "needs credentials". Keep the server's own short reason:
+        # the streamable client replaces it with "Server returned an error response".
+        if code == 403 and credentialed:
+            reason = ""
+            ctype = (response.headers.get("content-type") or "").lower()
+            if ctype.startswith(("text/", "application/json")) or not ctype:
+                try:
+                    body = (await response.aread()).decode("utf-8", "replace")
+                    reason = " ".join(body.split())[:300]
+                except Exception:  # noqa: BLE001 — a reason we cannot read is simply absent
+                    reason = ""
+            seen["denied"] = reason or True
+        # D12 (2026-09-25): the 2026-08-13 discover fallback sends a SECOND request after a refused
+        # initialize, and its 400 used to overwrite the 401 — agentic-news read as "no MCP endpoint".
+        # Keep the refusal apart from the last status; any 2xx clears it, because the sign-in flow's
+        # own first response is the 401 that starts it, and a later success means it was answered.
+        if code in (401, 403):
+            seen["refused"] = code
+        elif 200 <= code < 300:
+            seen["refused"] = None
+            seen["denied"] = None
+            seen["not_mcp"] = False
 
     return seen, hook
 
 
+def _anonymous(url: str, headers: dict[str, str] | None, auth: Any) -> bool | None:
+    """True when nothing that could be a credential went with the connection, else None (never
+    False: a header we cannot classify is not proof that a token exists either)."""
+    from urllib.parse import urlsplit
+    return True if not headers and auth is None and not urlsplit(url).query else None
+
+
+def _not_mcp_signal(seen: dict[str, Any]) -> bool:
+    """A web-page answer was seen AND no sign-in refusal was: a recorded 401/403 refusal outranks a
+    later page (D12 order — the discover fallback's second request must not undo the first)."""
+    return bool(seen["not_mcp"]) and not seen["refused"]
+
+
+#: The only bodies a Streamable HTTP server may answer a JSON-RPC request with (MCP spec,
+#: transports: "Content-Type: text/event-stream … or Content-Type: application/json").
+_MCP_CONTENT_TYPES = ("application/json", "text/event-stream")
+
+
+def _not_mcp_answer(response, credentialed: bool) -> bool:
+    """True when this response proves the URL is not an MCP endpoint's sign-in wall or answer.
+
+    - An uncredentialed 403 with no `WWW-Authenticate`. The MCP authorization spec refuses with 401
+      + `WWW-Authenticate` (RFC 9728), and its 403 (`insufficient_scope`) carries one too. Every
+      recorded challenge-less 403 was a web page (npmjs.com, python.org) or a bot block, never an
+      MCP server (T2, 2026-09-25). A credentialed 403 stays "signed in, refused" (Axiom).
+    - A 404/405 to a POST that carried no Mcp-Session-Id: a wrong path (T1).
+    - A 2xx to a POST whose body is neither JSON nor SSE: a page (pypi.org), not MCP (T1).
+      202/204 carry no body by design (the spec's answer to a notification); no content type
+      at all proves nothing."""
+    headers = response.headers
+    if response.status_code in (404, 405) and response.request.method == "POST":
+        # The spec's only MCP 404 is an expired session, which needs an Mcp-Session-Id to expire.
+        # Without one, the path serves no MCP (a wrong path, a page that takes no POST).
+        return "mcp-session-id" not in {k.lower() for k in response.request.headers}
+    if response.status_code == 403:
+        return not credentialed and "www-authenticate" not in {k.lower() for k in headers}
+    if 200 <= response.status_code < 300 and response.request.method == "POST" \
+            and response.status_code not in (202, 204):
+        ctype = (headers.get("content-type") or "").split(";")[0].strip().lower()
+        # A page always names its type. A missing one is no signal: a non-compliant server may
+        # answer `notifications/initialized` 200-empty (the spec says 202) and still be MCP.
+        return bool(ctype) and ctype not in _MCP_CONTENT_TYPES
+    return False
+
+
 async def _bounded(coro_factory, name: str, transport: str, timeout: float,
-                   status_hint: Any = None) -> ServerSnapshot:
+                   status_hint: Any = None, not_mcp_hint: Any = None) -> ServerSnapshot:
     try:
         return await asyncio.wait_for(coro_factory(), timeout)
     except (asyncio.TimeoutError, TimeoutError) as e:
+        if _oauth_failure(e) is not None:
+            # A sign-in that timed out is also a TimeoutError; it is a sign-in, not a silent server.
+            return ServerSnapshot(name=name, transport=transport, protocol_version=None,
+                                  error=f"{type(e).__name__}: {e}", error_kind=_oauth_failure(e))
         # NOT "unreachable": something accepted the connection and then never answered. That is a
         # different fault with a different fix — look at the server's own logs, not at the address —
         # and it is the one the beta page describes as "sits there doing nothing".
@@ -236,12 +322,43 @@ async def _bounded(coro_factory, name: str, transport: str, timeout: float,
     except Exception as e:  # noqa: BLE001 — surface, never crash the scan
         real = _unwrap(e)
         status = status_hint() if status_hint is not None else None
+        detail = f"{type(real).__name__}: {real}"
+        if status is not None and status >= 400 and str(status) not in detail:
+            # The streamable client drops the status from its error; say what the server answered.
+            detail += f" (HTTP {status})"
         return ServerSnapshot(name=name, transport=transport, protocol_version=None,
-                              error=f"{type(real).__name__}: {real}",
-                              error_kind=_kind_of(real, status, transport))
+                              error=detail, error_kind=_kind_of(
+                                  real, status, transport,
+                                  not_mcp=bool(not_mcp_hint and not_mcp_hint())))
 
 
-def _kind_of(exc: BaseException, status: int | None = None, transport: str | None = None) -> str:
+def _oauth_failure(exc: BaseException) -> str | None:
+    """'registration-refused' / 'sign-in-failed' when an MCP SDK OAuth error is anywhere in the
+    chain (task groups wrap it, `raise from` hides it), else None. By type, never by message."""
+    try:
+        from mcp.client.auth.exceptions import OAuthFlowError, OAuthRegistrationError, OAuthTokenError
+    except ImportError:                                   # pragma: no cover - an mcp dep
+        return None
+    seen: set[int] = set()
+    stack: list[BaseException | None] = [exc]   # a missing cause is skipped below
+    while stack:
+        e = stack.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, OAuthRegistrationError):
+            return "registration-refused"
+        if getattr(type(e), "sign_in_incomplete", False):
+            return "sign-in-incomplete"
+        if isinstance(e, (OAuthFlowError, OAuthTokenError)):
+            return "sign-in-failed"
+        stack.extend(getattr(e, "exceptions", ()) or ())
+        stack.extend((e.__cause__, e.__context__))
+    return None
+
+
+def _kind_of(exc: BaseException, status: int | None = None, transport: str | None = None,
+             not_mcp: bool = False) -> str:
     """Classify a probe failure by EXCEPTION TYPE, never by message text (F2's lesson). An
     HTTPStatusError means the host answered HTTP and then refused to speak MCP — that is a live URL
     that isn't an MCP endpoint (a docs page, a 404, a 405 on the wrong path), which is a different
@@ -253,6 +370,12 @@ def _kind_of(exc: BaseException, status: int | None = None, transport: str | Non
     which is why the ladder's error text looked right while the classification silently fell
     through to "unreachable". Only our own non-MCP fetches (the Server Card) raise the plain httpx
     type. Checking one fork is the same as checking neither."""
+    oauth = _oauth_failure(exc)
+    if oauth is not None:
+        # OUR sign-in broke, on a live endpoint. Before this, an OAuth flow error fell through to
+        # "not-an-mcp-endpoint" / "unreachable" and printed "no MCP endpoint found" — Linear,
+        # Sentry, Globalping, Semgrep, Supabase all read as the server's fault (RCA RC3, 2026-09-24).
+        return oauth
     types: list[type] = []
     for module in ("httpx", "httpx2"):
         try:
@@ -264,15 +387,31 @@ def _kind_of(exc: BaseException, status: int | None = None, transport: str | Non
         # as "not an MCP endpoint" sends the user to check their URL when the real fix is a token —
         # observed live against a real hosted server, which is why this case is split out.
         response = getattr(exc, "response", None)
+        if response is not None and getattr(response, "request", None) is not None \
+                and _not_mcp_answer(response, "authorization" in {
+                    k.lower() for k in response.request.headers}):
+            return "not-an-mcp-endpoint"           # a web page's 403, not a sign-in wall (T2)
         if response is not None and getattr(response, "status_code", None) in (401, 403):
             return "auth-required"
+        if response is not None and (getattr(response, "status_code", None) or 0) >= 500:
+            # D13 (2026-09-25): a 502/503 is a live host failing, not "a docs page" — aarna and
+            # agenticshelf were told their URL was not an MCP endpoint during an outage.
+            return "server-error"
         return "not-an-mcp-endpoint"
     # Nothing in the exception, but the transport SAW a refusal (see `_status_recorder`). Only
     # 401/403 is read this way: those are the one case where the endpoint is provably live and the
     # user's next move is a credential, not a different URL. Any other recorded status is left to
     # the type-based rules above rather than guessed at from a number.
+    if not_mcp:
+        # The transport saw a web page answer (see `_not_mcp_answer`): the SDK only says
+        # "Unexpected content type" or "error response", which used to read "unreachable" (T1).
+        return "not-an-mcp-endpoint"
     if status in (401, 403):
         return "auth-required"
+    if status is not None and status >= 500:
+        # The streamable client turns any 5xx into MCPError("Server returned an error response")
+        # with no status; the recorder saw it.
+        return "server-error"
     try:
         from .oauth_login import LoginNeeded
         if isinstance(exc, LoginNeeded):
@@ -287,9 +426,32 @@ def _kind_of(exc: BaseException, status: int | None = None, transport: str | Non
         if isinstance(exc, (FileNotFoundError, PermissionError)):
             return "command-missing"
         return "server-failed"
+    if _host_not_found(exc):
+        return "host-not-found"
     if _connect_failed(exc):
         return "connect-failed"
     return "unreachable"
+
+
+def _host_not_found(exc: BaseException) -> bool:
+    """Did the host NAME fail to resolve? A `socket.gaierror` in the cause chain, by type: the SDK
+    raises httpx2.ConnectError <- httpcore2.ConnectError <- gaierror (measured 2026-09-26), the same
+    outer type as a refused connection. Nothing was contacted, so "no MCP endpoint found" and the
+    docs-URL hint were guesses about a server nobody reached (docfork, sweep 2026-09-25)."""
+    import socket
+    seen: set[int] = set()
+
+    def _walk(e: BaseException | None) -> bool:
+        if e is None or id(e) in seen:
+            return False
+        seen.add(id(e))
+        if isinstance(e, socket.gaierror):
+            return True
+        if isinstance(e, BaseExceptionGroup) and any(_walk(sub) for sub in e.exceptions):
+            return True
+        return _walk(e.__cause__) or _walk(e.__context__)
+
+    return _walk(exc)
 
 
 def _connect_failed(exc: BaseException) -> bool:
@@ -478,9 +640,16 @@ async def probe_http(name: str, url: str, headers: dict[str, str] | None = None,
             async with streamable_http_client(url, http_client=http_client) as (read, write):
                 async with ClientSession(read, write) as session:
                     snap = await _snapshot(session, name, "http")
+        snap.anonymous = _anonymous(url, headers, auth)
         snap.server_card = await fetch_card(url)   # public, unauthenticated; tolerant
         return snap
-    return await _bounded(_do, name, "http", timeout, status_hint=lambda: seen["status"])
+    snap = await _bounded(_do, name, "http", timeout, status_hint=lambda: seen["refused"] or seen["status"],
+                          not_mcp_hint=lambda: _not_mcp_signal(seen))
+    if snap.error and seen["denied"] and snap.error_kind == "auth-required":
+        snap.error_kind = "access-denied"
+        if isinstance(seen["denied"], str):
+            snap.error += f' — the server says: "{seen["denied"]}"'
+    return snap
 
 
 async def probe_sse(name: str, url: str, headers: dict[str, str] | None = None,
@@ -490,6 +659,7 @@ async def probe_sse(name: str, url: str, headers: dict[str, str] | None = None,
         async with sse_client(url, headers=headers or {}, auth=auth, **extra) as (read, write):
             async with ClientSession(read, write) as session:
                 snap = await _snapshot(session, name, "sse")
+        snap.anonymous = _anonymous(url, headers, auth)
         snap.server_card = await fetch_card(url)
         return snap
     return await _bounded(_do, name, "sse", timeout)
@@ -543,7 +713,9 @@ async def probe_url(name: str, url: str, headers: dict[str, str] | None = None,
                 snap.declared_transport = declared
             return snap
         attempts.append((cand.label, snap))
-        if snap.error_kind == "auth-required":
+        # T5 (2026-09-25): "signed in, refused" is the same proof of a live endpoint as a 401, and
+        # carrying on offered the credential to every other path and printed their 404s under it.
+        if snap.error_kind in ("auth-required", "access-denied"):
             # The endpoint answered "you're not allowed in" — it EXISTS. Guessing further paths
             # would be noise, and would offer any supplied credential to more URLs than the user
             # named. Stop and tell them the truth: get a token, don't change the URL.
@@ -559,10 +731,40 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
     lie by omission — the user needs to see that we tried the other transport and the other paths,
     or they will chase a "server down" that is really a typo (and vice versa)."""
     kinds = {s.error_kind for _, s in attempts}
+    # What the URL the user GAVE did, apart from the paths we guessed. Labels are "<transport>
+    # <redacted url>" (transport.Candidate.label).
+    given: set = set()
+    if url:
+        from .redact import redact_url
+        mine = {url, redact_url(url) or url}
+        given = {s.error_kind for label, s in attempts if label.split(" ", 1)[-1] in mine}
+    # THE USER'S OWN URL TIMING OUT outranks a guessed path's web page (30-server rescan,
+    # 2026-09-26): bureau's /mcp timed out once, `/` and `/sse` answered 405/404/HTML, and the
+    # report said NOT AN MCP ENDPOINT, "It answered" — about paths nobody named. A re-run was CLEAN.
+    own_url_timed_out = "timed-out" in given and "not-an-mcp-endpoint" not in given
     # Most specific, most actionable kind wins — each one sends the user somewhere different.
-    if "auth-required" in kinds:
+    if "registration-refused" in kinds:
+        kind = "registration-refused"
+    elif "sign-in-incomplete" in kinds:
+        kind = "sign-in-incomplete"
+    elif "sign-in-failed" in kinds:
+        kind = "sign-in-failed"
+    elif "access-denied" in kinds:
+        kind = "access-denied"
+    elif "auth-required" in kinds:
         kind = "auth-required"
-    elif "not-an-mcp-endpoint" in kinds:
+        try:
+            from .oauth_login import stored_login_unreadable
+            if url and stored_login_unreadable(url):
+                # A sign-in IS stored and could not be decrypted: "needs credentials" would hide it.
+                kind = "login-unreadable"
+        except Exception:  # noqa: BLE001 — a probe for a better label must never break the report
+            pass
+    elif "server-error" in kinds:
+        # Above not-an-mcp-endpoint: one path answering 5xx says the service is there and failing;
+        # the other paths' 404s say nothing about that.
+        kind = "server-error"
+    elif "not-an-mcp-endpoint" in kinds and not own_url_timed_out:
         kind = "not-an-mcp-endpoint"
     elif "timed-out" in kinds:
         # Above "unreachable" for the same reason as the two before it: a candidate that ACCEPTED
@@ -577,6 +779,10 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
         # trusts the name. No planted file, no privilege, a free port. A dangling COMMAND at least
         # needs a file written at a known path; this needs nothing. Named so the row can say it.
         kind = "nothing-listening"
+    elif kinds == {"host-not-found"}:
+        # Every attempt failed to resolve the name. One host is tried, so a mix means something
+        # did answer, and the rules above decide.
+        kind = "host-not-found"
     else:
         kind = "unreachable"
 
@@ -588,12 +794,35 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
     lines = [f"  - {label}: {' '.join((snap.error or 'no detail').split())}"
              for label, snap in attempts]
     if skipped:
-        why = ("endpoint found, it needs credentials" if kind == "auth-required"
+        why = ("endpoint found, it refused this account" if kind == "access-denied"
+               else "endpoint found, it needs credentials" if kind in (
+                   "auth-required", "sign-in-failed", "sign-in-incomplete", "registration-refused",
+                   "login-unreadable")
                else f"time budget {PERMUTE_BUDGET:.0f}s exhausted")
         lines.append(f"  - not attempted ({why}): " + ", ".join(skipped))
-    if kind == "auth-required":
+    if kind == "login-unreadable":
+        head = ("a stored sign-in exists but cannot be decrypted (its key changed or was lost) — "
+                "sign in again: `mcpgawk scan --http <url> --login`")
+    elif kind == "sign-in-incomplete":
+        head = ("sign-in not completed — the endpoint is live and asked you to sign in, but the "
+                "browser approval did not come back (it timed out or was declined). Run the same "
+                "command again and approve in the browser; the SDK said")
+    elif kind == "sign-in-failed":
+        head = ("sign-in failed — the endpoint is live and the sign-in broke, which may be "
+                "mcpgawk's fault rather than the server's (the server's own client may work). "
+                "`mcpgawk report` writes the details we need; the SDK said")
+    elif kind == "registration-refused":
+        head = ("the server refuses automatic client registration — sign in with a client you "
+                "register with it yourself: `mcpgawk scan --http <url> --login --oauth-client-id <id>`")
+    elif kind == "auth-required":
         head = ("authentication required — the endpoint is live but refused this scan; "
                 "retry with `--login` or `--header \"Authorization: Bearer …\"`")
+    elif kind == "access-denied":
+        head = ("signed in, but the server refused access (HTTP 403) — the credential was accepted "
+                "and this account is not allowed in; the server's own reason follows")
+    elif kind == "server-error":
+        head = ("the server is answering with errors (HTTP 5xx) — it is up but failing; the URL is "
+                "right, try again later")
     elif kind == "timed-out":
         head = ("no answer within the time budget — the connection was accepted and the server "
                 "never replied")
@@ -602,6 +831,10 @@ def _aggregate_failure(name: str, declared: str, attempts: list[tuple[str, Serve
         where = urlsplit(url or "").netloc or "its loopback address"
         head = (f"nothing is listening on {where} — every attempt was refused. The entry is still "
                 f"configured, so whatever binds that port next answers as this server")
+    elif kind == "host-not-found":
+        from urllib.parse import urlsplit
+        where = urlsplit(url or "").hostname or "its host"
+        head = f"the host name {where} does not resolve — nothing was contacted"
     else:
         head = (f"no MCP endpoint found — tried {len(attempts)} transport/path permutation"
                 f"{'s' if len(attempts) != 1 else ''}")
@@ -699,7 +932,11 @@ async def _probe(entry: dict[str, Any], name: str) -> ServerSnapshot:
                               error_kind="misconfigured")
     # A config entry's `transport` is a CLAIM, and a stale one more often than not — so it only sets
     # the order we try things in, never what we trust. See probe_url / transport.py.
-    transport = entry.get("transport", "http")
+    # Claude Code and VS Code spell it `type` ("sse" / "http" / "streamable-http"); reading only
+    # `transport` tried every correctly declared SSE server as HTTP first and told the user to fix
+    # a config that was right. `type: "local"` (opencode) is a command, not a transport claim.
+    _type = str(entry.get("type") or "").lower().replace("_", "-")
+    transport = entry.get("transport") or ("sse" if _type == "sse" else "http")
     headers = entry.get("headers")
     auth = None
     if entry.get("_refreshable_login"):
